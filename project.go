@@ -68,6 +68,31 @@ func getURL(ctx context.Context, token, url string) (string, error) {
 	return string(body), nil
 }
 
+// deleteURL performs an authenticated DELETE and returns the raw JSON body.
+// Used for endpoints the SDK does not cover (e.g. template deletion).
+func deleteURL(ctx context.Context, token, url string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "dooray-api "+token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("DELETE %s failed: status %d, body: %s", url, resp.StatusCode, string(body))
+	}
+	return string(body), nil
+}
+
 // putJSON performs an authenticated PUT with a JSON payload and returns the raw JSON body.
 func putJSON(ctx context.Context, token, url string, payload []byte) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(payload))
