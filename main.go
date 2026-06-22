@@ -33,6 +33,8 @@ func main() {
 
 	ProjectTools(s, token)
 
+	TemplateTools(s, token)
+
 	// Start the server
 	if err := server.ServeStdio(s); err != nil {
 		fmt.Printf("Server error: %v\n", err)
