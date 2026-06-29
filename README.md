@@ -9,6 +9,9 @@ Dooray! 를 Claude 등 MCP 호환 AI 클라이언트에서 사용할 수 있도�
 | 분류 | 기능 | 관련 도구 |
 |------|------|-----------|
 | 메신저 | 다른 멤버에게 DM 전송 | `dooray_messenger` |
+| 메신저 | 채널에 메시지 전송 | `dooray_messenger` |
+| 메신저 | 내가 속한 채널 목록 조회 | `dooray_messenger` |
+| 메신저 | 채널의 최근 메시지 조회 | `dooray_messenger` |
 | 캘린더 | 내 캘린더 목록 조회 | `dooray_calendar_calendars` |
 | 캘린더 | 기간별 일정 조회 | `dooray_calendar_events` |
 | 캘린더 | 일정 등록 (종일/반복일정 지원) | `dooray_calendar_post_event` |
@@ -16,6 +19,11 @@ Dooray! 를 Claude 등 MCP 호환 AI 클라이언트에서 사용할 수 있도�
 | 계정 | 멤버 상세정보 조회 | `dooray_account_member` |
 | 프로젝트 | 참여 중인 프로젝트 조회 | `dooray_project` |
 | 프로젝트 | 업무(포스트) 검색 (담당자/상태/기한 필터) | `dooray_posts` |
+| 프로젝트 | 업무(포스트) 단건 조회 (본문 포함) | `dooray_posts` |
+| 프로젝트 | 업무(포스트) 등록 (담당자/참조자/태그/우선순위 지정) | `dooray_posts` |
+| 프로젝트 | 업무(포스트) 수정 (제목/본문/담당자/태그 — 전체 치환) | `dooray_posts` |
+| 프로젝트 | 업무 상태(워크플로) 변경 | `dooray_posts` |
+| 프로젝트 | 업무 댓글(로그) 작성·조회 | `dooray_posts` |
 | 기타 | 현재 시각 조회 | `os` |
 
 반복 일정은 `daily / weekly / monthly / yearly` 주기, interval, 종료일, 요일/일자 지정까지 지원합니다.
@@ -135,6 +143,18 @@ claude "오늘 내 캘린더 일정을 알려줘"
 정만티에게 "회의 시작합니다" 라고 DM 보내줘.
 ```
 
+```
+"개발팀" 채널에 배포 시작한다고 알려줘.
+```
+
+```
+내가 들어가 있는 채널 목록 보여줘.
+```
+
+```
+"공지" 채널 최근 메시지 20개 요약해 줘.
+```
+
 ### 캘린더 조회
 
 ```
@@ -175,15 +195,23 @@ Dooray-잘쓰자 프로젝트에서 내게 할당된 업무 중 이번 주 마�
 지난 30일간 생성된 내 업무를 상태별로 정리해 줘.
 ```
 
+```
+Dooray-잘쓰자 프로젝트에 "릴리즈 회고" 업무를 만들어줘. 담당자는 정만티, 우선순위는 high.
+```
+
 ## 도구 레퍼런스
 
 ### `dooray_messenger`
 
+DM 전송, 채널 메시지 전송, 채널 목록/로그 조회를 하나의 도구로 처리합니다.
+
 | 파라미터 | 필수 | 설명 |
 |----------|------|------|
-| operation | O | `send` |
-| to | O | 수신자의 organizationMemberId |
-| message | O | 보낼 메시지 본문 |
+| operation | O | `send` (DM), `send_channel` (채널 메시지), `find_channels` (채널 목록), `find_channel_logs` (채널 메시지 조회) |
+| to | △ | 수신자의 organizationMemberId (`send` 에서 필수) |
+| message | △ | 보낼 메시지 본문 (`send`, `send_channel` 에서 필수) |
+| channelId | △ | 채널 ID (`send_channel`, `find_channel_logs` 에서 필수) |
+| limit | X | `find_channel_logs` 에서 가져올 메시지 최대 개수 (기본 50) |
 
 ### `dooray_calendar_calendars`
 
@@ -237,12 +265,19 @@ Dooray-잘쓰자 프로젝트에서 내게 할당된 업무 중 이번 주 마�
 
 ### `dooray_posts`
 
-업무(포스트) 검색 도구. `projectId` 만 필수이며, 나머지는 필터로 사용됩니다.
+업무(포스트) 검색·조회·등록·수정·상태변경·댓글을 지원합니다.
+
+**공통**
 
 | 파라미터 | 설명 |
 |----------|------|
-| operation | `find_posts` (필수) |
-| projectId | 프로젝트 ID (필수, 쉼표로 여러 개 지정 가능) |
+| operation | `find_posts`(검색) / `get_post`(단건 조회) / `create_post`(등록) / `update_post`(수정) / `set_workflow`(상태 변경) / `create_log`(댓글 작성) / `get_logs`(댓글 조회) (필수) |
+| projectId | 프로젝트 ID (필수, 검색 시 쉼표로 여러 개 지정 가능) |
+
+**`find_posts` 필터**
+
+| 파라미터 | 설명 |
+|----------|------|
 | page / size | 페이지(기본 0), 페이지 크기(기본 20, 최대 100) |
 | fromEmailAddress | 보낸 사람 이메일로 필터 |
 | fromMemberIds | 작성자 memberId (쉼표 구분) |
@@ -258,6 +293,67 @@ Dooray-잘쓰자 프로젝트에서 내게 할당된 업무 중 이번 주 마�
 | subjects | 제목 키워드 |
 | createdAt / updatedAt / dueAt | 날짜 필터. `today`, `thisweek`, `prev-30d`, `next-7d`, 또는 ISO8601 구간 `~` 형식 |
 | order | 정렬: `postDueAt`, `postUpdatedAt`, `createdAt` (내림차순은 `-` 접두사) |
+
+**`create_post` 파라미터**
+
+| 파라미터 | 필수 | 설명 |
+|----------|------|------|
+| subject | O | 업무 제목 |
+| bodyContent | O | 업무 본문 |
+| bodyMimeType | X | `text/x-markdown` (기본) 또는 `text/html` |
+| toMemberIdsCreate | X | 담당자 organizationMemberId 목록 (쉼표 구분) |
+| ccMemberIdsCreate | X | 참조자 organizationMemberId 목록 (쉼표 구분) |
+| tagIdsCreate | X | 태그 ID 목록 (쉼표 구분) |
+| priority | X | `urgent` / `high` / `normal` / `low` |
+| parentPostIdCreate | X | 상위 업무 ID (하위 업무로 등록) |
+| milestoneIdCreate | X | 마일스톤 ID |
+| workflowId | X | 워크플로 ID |
+
+**`get_post` 파라미터** — 단건 업무를 본문 포함 전체 조회
+
+| 파라미터 | 필수 | 설명 |
+|----------|------|------|
+| postId | O | 업무 ID |
+
+**`update_post` 파라미터** — 업무 수정
+
+> ⚠️ `update_post`는 **전체 치환(full replacement)** 입니다. 전송한 키만 갱신되고, `users`(to/cc)를 보내면 그 안의 to/cc가 통째로 교체됩니다. 키를 생략하면 기존 값이 보존됩니다. subject/bodyContent는 필수이므로, 먼저 `get_post`로 현재 값을 읽어 **그대로 다시 보내야** 데이터가 유실되지 않습니다.
+
+| 파라미터 | 필수 | 설명 |
+|----------|------|------|
+| postId | O | 업무 ID |
+| subject | O | 업무 제목 (생략 시 비워짐) |
+| bodyContent | O | 업무 본문 (생략 시 비워짐) |
+| bodyMimeType | X | `text/x-markdown` (기본) 또는 `text/html` |
+| toMemberIdsCreate | X | 담당자 organizationMemberId 목록. 보내면 to가 교체됨. 담당자를 유지하려면 생략 |
+| ccMemberIdsCreate | X | 참조자 organizationMemberId 목록 |
+| tagIdsCreate | X | 태그 ID 목록. 보내면 태그가 교체되므로 기존+신규를 합쳐서 전송 |
+| priority | X | `urgent` / `high` / `normal` / `low` |
+| toMemberWorkflowId | X | to 담당자에 인라인 workflow.id 부착. ※Dooray는 update PUT에서 이 값을 무시하므로 상태 변경은 `set_workflow`를 쓸 것 |
+
+**`set_workflow` 파라미터** — 업무 상태(워크플로) 변경 (내부적으로 `POST .../set-workflow`)
+
+| 파라미터 | 필수 | 설명 |
+|----------|------|------|
+| postId | O | 업무 ID |
+| setWorkflowId | O | 변경할 워크플로 ID (해당 프로젝트의 `GET .../workflows`에서 조회) |
+
+**`create_log` 파라미터** — 업무에 댓글(로그) 작성
+
+| 파라미터 | 필수 | 설명 |
+|----------|------|------|
+| postId | O | 업무 ID |
+| logContent | O | 댓글 본문 (멘션: `[@이름](dooray://{orgId}/members/{memberId} "member")`) |
+| logMimeType | X | `text/x-markdown` (기본) 또는 `text/html` |
+
+**`get_logs` 파라미터** — 업무 댓글(로그) 목록 조회
+
+| 파라미터 | 필수 | 설명 |
+|----------|------|------|
+| postId | O | 업무 ID |
+| page / size | X | 페이지(기본 0), 페이지 크기(기본 20) |
+
+> **게시글 태그 부분 수정(add/remove)은 공개 API에 없음 (2026-06 검증).** 웹 UI가 쓰는 `POST example.dooray.com/v2/wapi/projects/{pid}/posts/modify-tags`(body `{postIdList, addTagIdList, removeTagIdList}`)는 **브라우저 쿠키 세션 인증 전용**이라 `dooray-api` 토큰으로는 401이고, 공개 API(`api.dooray.com`)엔 어떤 경로(`.../posts/modify-tags`, `.../posts/{id}/tags`, POST/PUT)로도 404다. 따라서 태그 변경은 `update_post`(PUT 전체치환)로만 가능하다. 본문을 건드리지 않고 태그만 바꾸려면 `get_post`로 현재 subject/body/users/tags를 읽어 tagIds만 병합한 뒤 `update_post`를 호출하는 헬퍼(예: `add_tags` op)를 두는 것이 정석. (향후 추가 후보.)
 
 ### `os`
 
