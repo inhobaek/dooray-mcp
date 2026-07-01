@@ -24,6 +24,8 @@ Dooray! 를 Claude 등 MCP 호환 AI 클라이언트에서 사용할 수 있도�
 | 프로젝트 | 업무(포스트) 수정 (제목/본문/담당자/태그 — 전체 치환) | `dooray_posts` |
 | 프로젝트 | 업무 상태(워크플로) 변경 | `dooray_posts` |
 | 프로젝트 | 업무 댓글(로그) 작성·조회 | `dooray_posts` |
+| 위키 | 위키 페이지 단건 조회 (URL/pageId, 본문 포함) | `dooray_wiki` |
+| 위키 | 위키 목록·페이지 목록 조회 | `dooray_wiki` |
 | 기타 | 현재 시각 조회 | `os` |
 
 반복 일정은 `daily / weekly / monthly / yearly` 주기, interval, 종료일, 요일/일자 지정까지 지원합니다.
@@ -355,6 +357,17 @@ DM 전송, 채널 메시지 전송, 채널 목록/로그 조회를 하나의 도
 
 > **게시글 태그 부분 수정(add/remove)은 공개 API에 없음 (2026-06 검증).** 웹 UI가 쓰는 `POST nhnent.dooray.com/v2/wapi/projects/{pid}/posts/modify-tags`(body `{postIdList, addTagIdList, removeTagIdList}`)는 **브라우저 쿠키 세션 인증 전용**이라 `dooray-api` 토큰으로는 401이고, 공개 API(`api.dooray.com`)엔 어떤 경로(`.../posts/modify-tags`, `.../posts/{id}/tags`, POST/PUT)로도 404다. 따라서 태그 변경은 `update_post`(PUT 전체치환)로만 가능하다. 본문을 건드리지 않고 태그만 바꾸려면 `get_post`로 현재 subject/body/users/tags를 읽어 tagIds만 병합한 뒤 `update_post`를 호출하는 헬퍼(예: `add_tags` op)를 두는 것이 정석. (향후 추가 후보.)
 
+### `dooray_wiki`
+
+위키 페이지를 본문 포함해 조회합니다. `/project/pages/{id}` 공유 URL은 pageId만 노출하지만, 위키 API는 pageId만으로 페이지가 조회되므로 URL이 곧 본문으로 변환됩니다 (wikiId 불필요).
+
+| 파라미터 | 필수 | 설명 |
+|----------|------|------|
+| operation | O | `get_page`(단건 조회) / `find_wikis`(위키 목록) / `find_pages`(위키의 최상위 페이지 목록) |
+| page | △ | `get_page` 에서 필수. 위키 페이지 URL(예: `https://nhnent.dooray.com/project/pages/3205786621378362771`) 또는 pageId. 문자열의 마지막 숫자 구간을 pageId로 추출하므로 URL 그대로 넣어도 됩니다 |
+| wikiId | △ | `find_pages` 에서 필수. `find_wikis` 결과 또는 `get_page` 응답의 `wikiId` 필드에서 얻습니다 |
+| page_num / size | X | `find_pages` 페이지(기본 0), 페이지 크기(기본 100, 최대 100) |
+
 ### `os`
 
 | 파라미터 | 필수 | 설명 |
@@ -378,6 +391,7 @@ DM 전송, 채널 메시지 전송, 채널 목록/로그 조회를 하나의 도
 ├── calendar.go         # 캘린더/일정 도구 (반복 일정 포함)
 ├── messenger.go        # 메신저 DM 도구
 ├── project.go          # 프로젝트/업무 도구
+├── wiki.go             # 위키 페이지 조회 도구
 ├── Makefile            # 크로스 컴파일 빌드 스크립트
 └── *_test.go           # 각 도구별 단위 테스트
 ```
