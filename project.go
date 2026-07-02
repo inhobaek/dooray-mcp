@@ -452,7 +452,7 @@ func postTools(s *server.MCPServer, token *string) {
 				Subject: subject,
 				Body: model.PostBody{
 					MimeType: bodyMimeType,
-					Content:  bodyContent,
+					Content:  linkifyDoorayURLs(*token, bodyMimeType, bodyContent),
 				},
 			}
 
@@ -540,7 +540,7 @@ func postTools(s *server.MCPServer, token *string) {
 				logMimeType = "text/x-markdown"
 			}
 			payload, err := json.Marshal(map[string]any{
-				"body": model.PostBody{MimeType: logMimeType, Content: logContent},
+				"body": model.PostBody{MimeType: logMimeType, Content: linkifyDoorayURLs(*token, logMimeType, logContent)},
 			})
 			if err != nil {
 				return nil, err
@@ -584,7 +584,7 @@ func postTools(s *server.MCPServer, token *string) {
 
 			upd := updatePostRequest{
 				Subject: subject,
-				Body:    model.PostBody{MimeType: bodyMimeType, Content: bodyContent},
+				Body:    model.PostBody{MimeType: bodyMimeType, Content: linkifyDoorayURLs(*token, bodyMimeType, bodyContent)},
 			}
 			if v, _ := request.GetArguments()["priority"].(string); v != "" {
 				upd.Priority = v
