@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 
 	model "github.com/dooray-go/dooray-sdk/openapi/model/project"
@@ -20,7 +23,12 @@ const doorayAPIEndpoint = "https://api.dooray.com"
 // getPost fetches a single post directly via the Dooray REST API
 // because dooray-sdk (v0.4.1) does not provide a single-post lookup.
 func getPost(ctx context.Context, token, projectId, postId string) (string, error) {
-	url := fmt.Sprintf("%s/project/v1/projects/%s/posts/%s", doorayAPIEndpoint, projectId, postId)
+	// projectId가 없으면(공유 URL은 postId만 노출) projectId 없는 엔드포인트로 조회한다.
+	// 응답 result.project.id 에 projectId가 담겨 와 후속 호출(set_workflow 등)에 쓸 수 있다.
+	url := fmt.Sprintf("%s/project/v1/posts/%s", doorayAPIEndpoint, postId)
+	if projectId != "" {
+		url = fmt.Sprintf("%s/project/v1/projects/%s/posts/%s", doorayAPIEndpoint, projectId, postId)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
@@ -143,6 +151,92 @@ func postJSON(ctx context.Context, token, url string, payload []byte) (string, e
 	return string(body), nil
 }
 
+// uploadPostFile uploads a file to a post via multipart/form-data and returns the
+// raw JSON response (result.id is the uploaded file id). The Dooray file API answers
+// the first request with 307 + a file-api.dooray.com location; Go's default client
+// strips the Authorization header on a cross-host redirect (same reason curl needs
+// --location-trusted), so we disable auto-redirect and re-issue the request to the
+// location ourselves, keeping the auth header and re-reading the file body.
+// fileType is "general" (shows in the attachment list) or "inline_image" (body-only,
+// referenced as ![](/files/{id}) and kept out of the attachment list).
+func uploadPostFile(ctx context.Context, token, projectId, postId, filePath, fileType string) (string, error) {
+	url := fmt.Sprintf("%s/project/v1/projects/%s/posts/%s/files", doorayAPIEndpoint, projectId, postId)
+	return uploadFileMultipart(ctx, token, url, filePath, fileType)
+}
+
+// uploadFileMultipart POSTs a file to a Dooray file endpoint via multipart/form-data
+// and returns the raw JSON response. The form-data order matters: "type" must precede
+// "file". The Dooray file API answers the first request with 307 + a file-api.dooray.com
+// location; Go's default client strips the Authorization header on a cross-host redirect
+// (same reason curl needs --location-trusted), so we disable auto-redirect and re-issue
+// the request to the location ourselves, keeping the auth header and re-reading the file.
+func uploadFileMultipart(ctx context.Context, token, url, filePath, fileType string) (string, error) {
+	buildReq := func(url string) (*http.Request, error) {
+		f, err := os.Open(filePath)
+		if err != nil {
+			return nil, err
+		}
+		defer f.Close()
+
+		var buf bytes.Buffer
+		w := multipart.NewWriter(&buf)
+		if err := w.WriteField("type", fileType); err != nil {
+			return nil, err
+		}
+		fw, err := w.CreateFormFile("file", filepath.Base(filePath))
+		if err != nil {
+			return nil, err
+		}
+		if _, err := io.Copy(fw, f); err != nil {
+			return nil, err
+		}
+		if err := w.Close(); err != nil {
+			return nil, err
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, &buf)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "dooray-api "+token)
+		req.Header.Set("Content-Type", w.FormDataContentType())
+		return req, nil
+	}
+
+	// Don't auto-follow: we must re-attach the auth header + body on the redirect host.
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+
+	for i := 0; i < 2; i++ { // at most one redirect hop
+		req, err := buildReq(url)
+		if err != nil {
+			return "", err
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return "", err
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return "", err
+		}
+		if resp.StatusCode == http.StatusTemporaryRedirect {
+			loc := resp.Header.Get("Location")
+			if loc == "" {
+				return "", fmt.Errorf("upload got 307 with no Location header")
+			}
+			url = loc
+			continue
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return "", fmt.Errorf("upload %s failed: status %d, body: %s", url, resp.StatusCode, string(body))
+		}
+		return string(body), nil
+	}
+	return "", fmt.Errorf("upload exceeded redirect limit")
+}
+
 // recipientWorkflow is the inline workflow field observed on closed posts:
 // {"type":"member","member":{...},"workflow":{"id":"..."}}.
 type recipientWorkflow struct {
@@ -231,12 +325,11 @@ func postTools(s *server.MCPServer, token *string) {
 		mcp.WithDescription("find dooray posts in projects"),
 		mcp.WithString("operation",
 			mcp.Required(),
-			mcp.Description("The operation to perform. 'find_posts': list posts with filters. 'get_post': get a single post with full body (requires postId). 'create_post': create a new post (requires subject, bodyContent). 'update_post': FULL-REPLACEMENT edit of a post (requires postId, subject, bodyContent — any field not resent is cleared; fetch current subject/body via get_post first). 'set_workflow': change a post's status/workflow (requires postId, setWorkflowId). 'create_log': add a comment/log to a post (requires postId, logContent). 'get_logs': list a post's comments/logs (requires postId)."),
-			mcp.Enum("find_posts", "get_post", "create_post", "update_post", "set_workflow", "create_log", "get_logs"),
+			mcp.Description("The operation to perform. 'find_posts': list posts with filters. 'get_post': get a single post with full body (requires postId). 'create_post': create a new post (requires subject, bodyContent). 'update_post': FULL-REPLACEMENT edit of a post (requires postId, subject, bodyContent — any field not resent is cleared; fetch current subject/body via get_post first). 'set_workflow': change a post's status/workflow (requires postId, setWorkflowId). 'create_log': add a comment/log to a post (requires postId, logContent). 'get_logs': list a post's comments/logs (requires postId). 'upload_inline_image': upload a local image file to a post (requires postId, filePath) and return {fileId, markdown}; paste the markdown into a body/comment to render it inline. Default fileType=inline_image (kept out of the attachment list); use fileType=general to also show it in attachments."),
+			mcp.Enum("find_posts", "get_post", "create_post", "update_post", "set_workflow", "create_log", "get_logs", "upload_inline_image"),
 		),
 		mcp.WithString("projectId",
-			mcp.Required(),
-			mcp.Description("project id, it can be a single id or a comma separated list of projectIds. it can be obtained from the find_projects tool. for get_post it must be a single id"),
+			mcp.Description("project id, it can be a single id or a comma separated list of projectIds. it can be obtained from the find_projects tool. Required for every operation EXCEPT get_post: get_post works with postId alone (the share URL https://.../project/tasks/{postId} exposes only postId), and the response's result.project.id gives you the projectId for any follow-up call."),
 		),
 		// get_post fields
 		mcp.WithString("postId",
@@ -272,6 +365,13 @@ func postTools(s *server.MCPServer, token *string) {
 		),
 		mcp.WithString("workflowId",
 			mcp.Description("workflow id for create_post"),
+		),
+		// upload_inline_image
+		mcp.WithString("filePath",
+			mcp.Description("absolute path to a local image file to upload (required for upload_inline_image)"),
+		),
+		mcp.WithString("fileType",
+			mcp.Description("upload_inline_image only: 'inline_image' (default, body-only) or 'general' (also shows in attachment list)"),
 		),
 		// set_workflow
 		mcp.WithString("setWorkflowId",
@@ -350,7 +450,7 @@ func postTools(s *server.MCPServer, token *string) {
 
 	s.AddTool(doorayPostTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		op := request.GetArguments()["operation"].(string)
-		projectId := request.GetArguments()["projectId"].(string)
+		projectId, _ := request.GetArguments()["projectId"].(string) // optional for get_post (share URL has only postId)
 
 		opts := project.GetPostsOptions{}
 
@@ -417,6 +517,11 @@ func postTools(s *server.MCPServer, token *string) {
 		// Sort
 		if v, ok := request.GetArguments()["order"].(string); ok {
 			opts.Order = v
+		}
+
+		// get_post는 공유 URL의 postId만으로 동작하므로 projectId가 비어도 된다. 그 외 op은 projectId 필수.
+		if projectId == "" && op != "get_post" {
+			return mcp.NewToolResultError("projectId is required for " + op), nil
 		}
 
 		var result string
@@ -634,6 +739,33 @@ func postTools(s *server.MCPServer, token *string) {
 				return nil, err
 			}
 			result = res
+		case "upload_inline_image":
+			postId, _ := request.GetArguments()["postId"].(string)
+			filePath, _ := request.GetArguments()["filePath"].(string)
+			if postId == "" || filePath == "" {
+				return mcp.NewToolResultError("postId and filePath are required for upload_inline_image"), nil
+			}
+			fileType, _ := request.GetArguments()["fileType"].(string)
+			if fileType == "" {
+				fileType = "inline_image"
+			}
+			res, err := uploadPostFile(ctx, *token, projectId, postId, filePath, fileType)
+			if err != nil {
+				return nil, err
+			}
+			// Parse result.id and hand back a ready-to-paste markdown snippet so the
+			// caller can drop it into a post body or comment via update_post/create_log.
+			var parsed struct {
+				Result struct {
+					ID string `json:"id"`
+				} `json:"result"`
+			}
+			if err := json.Unmarshal([]byte(res), &parsed); err != nil || parsed.Result.ID == "" {
+				return nil, fmt.Errorf("upload succeeded but could not parse file id from response: %s", res)
+			}
+			markdown := fmt.Sprintf("![%s](/files/%s)", filepath.Base(filePath), parsed.Result.ID)
+			out, _ := json.Marshal(map[string]string{"fileId": parsed.Result.ID, "markdown": markdown})
+			result = string(out)
 		}
 		return mcp.NewToolResultText(result), nil
 	})
