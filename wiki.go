@@ -46,6 +46,7 @@ type wikiBody struct {
 //	GET  /wiki/v1/pages/{page-id}                              single page by id (no wikiId needed)
 //	GET  /wiki/v1/wikis                                        list wikis
 //	GET  /wiki/v1/wikis/{wiki-id}/pages                        list top-level pages
+//	GET  /wiki/v1/wikis/{wiki-id}/pages?parentPageId={id}      list direct children of a page
 // Write (all need wikiId; get it from a get_page result's wikiId field):
 //	POST /wiki/v1/wikis/{wiki-id}/pages                        create page
 //	PUT  /wiki/v1/wikis/{wiki-id}/pages/{page-id}              update page (subject+body)
@@ -58,7 +59,7 @@ type wikiBody struct {
 //	DELETE /wiki/v1/wikis/{wiki-id}/pages/{page-id}/comments/{id} delete comment
 func WikiTools(s *server.MCPServer, token *string) {
 	tool := mcp.NewTool("dooray_wiki",
-		mcp.WithDescription("read and write Dooray Wiki pages. READ: 'get_page' (fetch full markdown body — pass a /project/pages/{id} URL or pageId; also returns wikiId), 'find_wikis' (list wikis), 'find_pages' (list a wiki's pages, needs wikiId). WRITE (need wikiId — get it from a get_page result): 'create_page' (needs wikiId, subject, content, parentPageId), 'update_page' (full page edit — needs wikiId, pageId, subject, content), 'update_content' (body only, best for appending — needs wikiId, pageId, content), 'update_title' (needs wikiId, pageId, subject), 'upload_file' (attach a local file, multipart — needs wikiId, pageId, filePath; returns insert markdown), 'create_comment' (needs wikiId, pageId, content), 'list_comments' (needs wikiId, pageId), 'update_comment' (needs wikiId, pageId, commentId, content), 'delete_comment' (needs wikiId, pageId, commentId). To append to a page: get_page for wikiId+current body, then update_content with old+new text."),
+		mcp.WithDescription("read and write Dooray Wiki pages. READ: 'get_page' (fetch full markdown body — pass a /project/pages/{id} URL or pageId; also returns wikiId), 'find_wikis' (list wikis), 'find_pages' (list a wiki's pages, needs wikiId; pass parentPageId to list only that page's direct children, omit for top-level pages — to walk a subtree, call find_pages repeatedly per child). WRITE (need wikiId — get it from a get_page result): 'create_page' (needs wikiId, subject, content, parentPageId), 'update_page' (full page edit — needs wikiId, pageId, subject, content), 'update_content' (body only, best for appending — needs wikiId, pageId, content), 'update_title' (needs wikiId, pageId, subject), 'upload_file' (attach a local file, multipart — needs wikiId, pageId, filePath; returns insert markdown), 'create_comment' (needs wikiId, pageId, content), 'list_comments' (needs wikiId, pageId), 'update_comment' (needs wikiId, pageId, commentId, content), 'delete_comment' (needs wikiId, pageId, commentId). To append to a page: get_page for wikiId+current body, then update_content with old+new text."),
 		mcp.WithString("operation",
 			mcp.Required(),
 			mcp.Description("The operation to perform."),
@@ -82,7 +83,7 @@ func WikiTools(s *server.MCPServer, token *string) {
 			mcp.Description("markdown body. Required for create_page/update_content/create_comment/update_comment; optional for update_page."),
 		),
 		mcp.WithString("parentPageId",
-			mcp.Description("parent page id for create_page (required by the API; a URL also works). Use a top-level page id to create directly under a wiki."),
+			mcp.Description("for find_pages: list only direct children of this page id (a URL also works); omit to list top-level pages. For create_page: parent page id (required by the API; a URL also works) — use a top-level page id to create directly under a wiki."),
 		),
 		mcp.WithString("commentId",
 			mcp.Description("comment id. Required for update_comment and delete_comment."),
@@ -137,8 +138,11 @@ func WikiTools(s *server.MCPServer, token *string) {
 			if wikiId == "" {
 				return mcp.NewToolResultError("wikiId is required for find_pages"), nil
 			}
-			result, err = getURL(ctx, *token, fmt.Sprintf("%s/wiki/v1/wikis/%s/pages?page=%d&size=%d",
-				doorayAPIEndpoint, url.PathEscape(wikiId), numOr("page_num", 0), numOr("size", 100)))
+			q := fmt.Sprintf("page=%d&size=%d", numOr("page_num", 0), numOr("size", 100))
+			if parentPageId := pageIDFromInput(str("parentPageId")); parentPageId != "" {
+				q += "&parentPageId=" + url.QueryEscape(parentPageId)
+			}
+			result, err = getURL(ctx, *token, fmt.Sprintf("%s/wiki/v1/wikis/%s/pages?%s", doorayAPIEndpoint, url.PathEscape(wikiId), q))
 
 		case "create_page":
 			wikiId, subject, content := str("wikiId"), str("subject"), str("content")
