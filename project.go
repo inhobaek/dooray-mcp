@@ -335,7 +335,7 @@ func postTools(s *server.MCPServer, token *string) {
 		mcp.WithDescription("find dooray posts in projects"),
 		mcp.WithString("operation",
 			mcp.Required(),
-			mcp.Description("The operation to perform. 'find_posts': list posts with filters. 'get_post': get a single post with full body (requires postId). 'create_post': create a new post (requires subject, bodyContent). 'update_post': FULL-REPLACEMENT edit of a post (requires postId, subject, bodyContent — any field not resent is cleared; fetch current subject/body via get_post first). 'set_workflow': change a post's status/workflow (requires postId, setWorkflowId). 'create_log': add a comment/log to a post (requires postId, logContent). 'get_logs': list a post's comments/logs (requires postId). 'delete_log': delete a comment/log (requires postId, logId — irreversible, TWO-STEP: the 1st call WITHOUT confirmToken deletes nothing and returns the comment preview + a one-time confirmToken; you MUST show the preview to the user and get their explicit approval, then call again WITH that confirmToken to actually delete. Never fabricate a confirmToken or skip the user approval). 'upload_inline_image': upload a local image file to a post (requires postId, filePath) and return {fileId, markdown}; paste the markdown into a body/comment to render it inline. Default fileType=inline_image (kept out of the attachment list); use fileType=general to also show it in attachments."),
+			mcp.Description("The operation to perform. 'find_posts': list posts with filters. 'get_post': get a single post with full body (requires postId). 'create_post': create a new post (requires subject, bodyContent). 'update_post': FULL-REPLACEMENT edit of a post (requires postId, subject, and body via either bodyContent or bodyFilePath — any field not resent is cleared; fetch current subject/body via get_post first. For large bodies, save get_post output to a file, edit a few lines, and pass bodyFilePath to avoid re-emitting the whole body). 'set_workflow': change a post's status/workflow (requires postId, setWorkflowId). 'create_log': add a comment/log to a post (requires postId, logContent). 'get_logs': list a post's comments/logs (requires postId). 'delete_log': delete a comment/log (requires postId, logId — irreversible, TWO-STEP: the 1st call WITHOUT confirmToken deletes nothing and returns the comment preview + a one-time confirmToken; you MUST show the preview to the user and get their explicit approval, then call again WITH that confirmToken to actually delete. Never fabricate a confirmToken or skip the user approval). 'upload_inline_image': upload a local image file to a post (requires postId, filePath) and return {fileId, markdown}; paste the markdown into a body/comment to render it inline. Default fileType=inline_image (kept out of the attachment list); use fileType=general to also show it in attachments."),
 			mcp.Enum("find_posts", "get_post", "create_post", "update_post", "set_workflow", "create_log", "get_logs", "delete_log", "upload_inline_image"),
 		),
 		mcp.WithString("projectId",
@@ -351,6 +351,9 @@ func postTools(s *server.MCPServer, token *string) {
 		),
 		mcp.WithString("bodyContent",
 			mcp.Description("post body markdown/html content (required for create_post)"),
+		),
+		mcp.WithString("bodyFilePath",
+			mcp.Description("update_post/create_post only: absolute path to a local file whose contents become the body. Use INSTEAD of bodyContent to avoid re-emitting a large body inline (e.g. save get_post output to a file, edit a few lines, pass the path). If both are given, bodyFilePath wins."),
 		),
 		mcp.WithString("bodyMimeType",
 			mcp.Description("post body mime type for create_post: 'text/x-markdown' (default) or 'text/html'"),
@@ -562,8 +565,15 @@ func postTools(s *server.MCPServer, token *string) {
 		case "create_post":
 			subject, _ := request.GetArguments()["subject"].(string)
 			bodyContent, _ := request.GetArguments()["bodyContent"].(string)
+			if p, _ := request.GetArguments()["bodyFilePath"].(string); p != "" {
+				b, err := os.ReadFile(p)
+				if err != nil {
+					return mcp.NewToolResultError(fmt.Sprintf("bodyFilePath read failed: %v", err)), nil
+				}
+				bodyContent = string(b)
+			}
 			if subject == "" || bodyContent == "" {
-				return mcp.NewToolResultError("subject and bodyContent are required for create_post"), nil
+				return mcp.NewToolResultError("subject and (bodyContent or bodyFilePath) are required for create_post"), nil
 			}
 			bodyMimeType, _ := request.GetArguments()["bodyMimeType"].(string)
 			if bodyMimeType == "" {
@@ -735,8 +745,15 @@ func postTools(s *server.MCPServer, token *string) {
 			postId, _ := request.GetArguments()["postId"].(string)
 			subject, _ := request.GetArguments()["subject"].(string)
 			bodyContent, _ := request.GetArguments()["bodyContent"].(string)
+			if p, _ := request.GetArguments()["bodyFilePath"].(string); p != "" {
+				b, err := os.ReadFile(p)
+				if err != nil {
+					return mcp.NewToolResultError(fmt.Sprintf("bodyFilePath read failed: %v", err)), nil
+				}
+				bodyContent = string(b)
+			}
 			if postId == "" || subject == "" || bodyContent == "" {
-				return mcp.NewToolResultError("postId, subject and bodyContent are required for update_post (PUT is full-replacement; resend subject+body fetched via get_post or they are cleared)"), nil
+				return mcp.NewToolResultError("postId, subject and (bodyContent or bodyFilePath) are required for update_post (PUT is full-replacement; resend subject+body fetched via get_post or they are cleared)"), nil
 			}
 			bodyMimeType, _ := request.GetArguments()["bodyMimeType"].(string)
 			if bodyMimeType == "" {
