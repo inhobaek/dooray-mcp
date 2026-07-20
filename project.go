@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	model "github.com/dooray-go/dooray-sdk/openapi/model/project"
 	"github.com/dooray-go/dooray-sdk/openapi/project"
@@ -19,6 +22,13 @@ import (
 )
 
 const doorayAPIEndpoint = "https://api.dooray.com"
+
+// delete_log 2단계 확인: 1차 호출이 발급한 1회용 토큰이 있어야만 실제 삭제한다.
+// ponytail: 프로세스 메모리 저장, stdio 단일 프로세스 MCP라 충분. 만료는 1회용 소진으로 갈음.
+var (
+	deleteLogTokensMu sync.Mutex
+	deleteLogTokens   = map[string]string{} // token -> projectId/postId/logId
+)
 
 // getPost fetches a single post directly via the Dooray REST API
 // because dooray-sdk (v0.4.1) does not provide a single-post lookup.
@@ -325,8 +335,8 @@ func postTools(s *server.MCPServer, token *string) {
 		mcp.WithDescription("find dooray posts in projects"),
 		mcp.WithString("operation",
 			mcp.Required(),
-			mcp.Description("The operation to perform. 'find_posts': list posts with filters. 'get_post': get a single post with full body (requires postId). 'create_post': create a new post (requires subject, bodyContent). 'update_post': FULL-REPLACEMENT edit of a post (requires postId, subject, bodyContent — any field not resent is cleared; fetch current subject/body via get_post first). 'set_workflow': change a post's status/workflow (requires postId, setWorkflowId). 'create_log': add a comment/log to a post (requires postId, logContent). 'get_logs': list a post's comments/logs (requires postId). 'upload_inline_image': upload a local image file to a post (requires postId, filePath) and return {fileId, markdown}; paste the markdown into a body/comment to render it inline. Default fileType=inline_image (kept out of the attachment list); use fileType=general to also show it in attachments."),
-			mcp.Enum("find_posts", "get_post", "create_post", "update_post", "set_workflow", "create_log", "get_logs", "upload_inline_image"),
+			mcp.Description("The operation to perform. 'find_posts': list posts with filters. 'get_post': get a single post with full body (requires postId). 'create_post': create a new post (requires subject, bodyContent). 'update_post': FULL-REPLACEMENT edit of a post (requires postId, subject, bodyContent — any field not resent is cleared; fetch current subject/body via get_post first). 'set_workflow': change a post's status/workflow (requires postId, setWorkflowId). 'create_log': add a comment/log to a post (requires postId, logContent). 'get_logs': list a post's comments/logs (requires postId). 'delete_log': delete a comment/log (requires postId, logId — irreversible, TWO-STEP: the 1st call WITHOUT confirmToken deletes nothing and returns the comment preview + a one-time confirmToken; you MUST show the preview to the user and get their explicit approval, then call again WITH that confirmToken to actually delete. Never fabricate a confirmToken or skip the user approval). 'upload_inline_image': upload a local image file to a post (requires postId, filePath) and return {fileId, markdown}; paste the markdown into a body/comment to render it inline. Default fileType=inline_image (kept out of the attachment list); use fileType=general to also show it in attachments."),
+			mcp.Enum("find_posts", "get_post", "create_post", "update_post", "set_workflow", "create_log", "get_logs", "delete_log", "upload_inline_image"),
 		),
 		mcp.WithString("projectId",
 			mcp.Description("project id, it can be a single id or a comma separated list of projectIds. it can be obtained from the find_projects tool. Required for every operation EXCEPT get_post: get_post works with postId alone (the share URL https://.../project/tasks/{postId} exposes only postId), and the response's result.project.id gives you the projectId for any follow-up call."),
@@ -383,6 +393,13 @@ func postTools(s *server.MCPServer, token *string) {
 		),
 		mcp.WithString("logMimeType",
 			mcp.Description("mime type for create_log body: 'text/x-markdown' (default) or 'text/html'"),
+		),
+		// delete_log
+		mcp.WithString("logId",
+			mcp.Description("comment/log id (required for delete_log). It can be obtained from get_logs."),
+		),
+		mcp.WithString("confirmToken",
+			mcp.Description("delete_log 2nd call only: the one-time token returned by the 1st delete_log call. Only pass it after the user explicitly approved the deletion of the previewed comment. Never fabricate it."),
 		),
 		// update_post
 		mcp.WithString("toMemberWorkflowId",
@@ -675,6 +692,45 @@ func postTools(s *server.MCPServer, token *string) {
 				return nil, err
 			}
 			result = res
+		case "delete_log":
+			postId, _ := request.GetArguments()["postId"].(string)
+			logId, _ := request.GetArguments()["logId"].(string)
+			if postId == "" || logId == "" {
+				return mcp.NewToolResultError("postId and logId are required for delete_log"), nil
+			}
+			logURL := fmt.Sprintf("%s/project/v1/projects/%s/posts/%s/logs/%s", doorayAPIEndpoint, projectId, postId, logId)
+			confirmToken, _ := request.GetArguments()["confirmToken"].(string)
+			if confirmToken == "" {
+				// 1차 호출: 삭제하지 않는다. 미리보기와 1회용 토큰만 발급한다.
+				preview, err := getURL(ctx, *token, logURL)
+				if err != nil {
+					return nil, err
+				}
+				buf := make([]byte, 4)
+				if _, err := rand.Read(buf); err != nil {
+					return nil, err
+				}
+				issued := hex.EncodeToString(buf)
+				deleteLogTokensMu.Lock()
+				deleteLogTokens[issued] = logURL
+				deleteLogTokensMu.Unlock()
+				result = fmt.Sprintf("NOT DELETED YET. Show the comment below to the user and get their explicit approval. Only after they approve, call delete_log again with confirmToken=%s. If they decline, do not call again.\n%s", issued, preview)
+			} else {
+				deleteLogTokensMu.Lock()
+				stored, ok := deleteLogTokens[confirmToken]
+				if ok && stored == logURL {
+					delete(deleteLogTokens, confirmToken) // 1회용: 성공 여부와 무관하게 소진
+				}
+				deleteLogTokensMu.Unlock()
+				if !ok || stored != logURL {
+					return mcp.NewToolResultError("invalid or already-used confirmToken. Call delete_log without confirmToken to get a fresh preview and token, then get user approval again."), nil
+				}
+				res, err := deleteURL(ctx, *token, logURL)
+				if err != nil {
+					return nil, err
+				}
+				result = fmt.Sprintf("deleted log %s\n%s", logId, res)
+			}
 		case "update_post":
 			postId, _ := request.GetArguments()["postId"].(string)
 			subject, _ := request.GetArguments()["subject"].(string)

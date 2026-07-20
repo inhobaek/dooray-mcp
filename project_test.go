@@ -525,3 +525,34 @@ func TestPostsToolSetWorkflowParsesArgs(t *testing.T) {
 		t.Logf("handler returned error result (invalid token expected): %+v", res)
 	}
 }
+
+// delete_log 2단계 확인 가드: 필수 인자 누락과 위조 토큰은 네트워크를 타지 않고 에러여야 한다.
+func TestDeleteLogGuards(t *testing.T) {
+	s := newTestServer()
+	token := "invalid-token"
+	ProjectTools(s, &token)
+
+	tool, ok := s.ListTools()["dooray_posts"]
+	if !ok {
+		t.Fatal("dooray_posts tool not registered")
+	}
+
+	call := func(args map[string]any) *mcp.CallToolResult {
+		args["operation"] = "delete_log"
+		args["projectId"] = "1"
+		res, err := tool.Handler(context.Background(), mcp.CallToolRequest{
+			Params: mcp.CallToolParams{Name: "dooray_posts", Arguments: args},
+		})
+		if err != nil {
+			t.Fatalf("handler error: %v", err)
+		}
+		return res
+	}
+
+	if res := call(map[string]any{"postId": "2"}); !res.IsError {
+		t.Error("expected error when logId is missing")
+	}
+	if res := call(map[string]any{"postId": "2", "logId": "3", "confirmToken": "deadbeef"}); !res.IsError {
+		t.Error("expected error for a confirmToken that was never issued")
+	}
+}
