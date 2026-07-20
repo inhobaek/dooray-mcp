@@ -3,11 +3,17 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 
 	model "github.com/dooray-go/dooray-sdk/openapi/model/project"
 	"github.com/dooray-go/dooray-sdk/openapi/project"
@@ -17,10 +23,22 @@ import (
 
 const doorayAPIEndpoint = "https://api.dooray.com"
 
+// delete_log 2단계 확인: 1차 호출이 발급한 1회용 토큰이 있어야만 실제 삭제한다.
+// ponytail: 프로세스 메모리 저장, stdio 단일 프로세스 MCP라 충분. 만료는 1회용 소진으로 갈음.
+var (
+	deleteLogTokensMu sync.Mutex
+	deleteLogTokens   = map[string]string{} // token -> projectId/postId/logId
+)
+
 // getPost fetches a single post directly via the Dooray REST API
 // because dooray-sdk (v0.4.1) does not provide a single-post lookup.
 func getPost(ctx context.Context, token, projectId, postId string) (string, error) {
-	url := fmt.Sprintf("%s/project/v1/projects/%s/posts/%s", doorayAPIEndpoint, projectId, postId)
+	// projectId가 없으면(공유 URL은 postId만 노출) projectId 없는 엔드포인트로 조회한다.
+	// 응답 result.project.id 에 projectId가 담겨 와 후속 호출(set_workflow 등)에 쓸 수 있다.
+	url := fmt.Sprintf("%s/project/v1/posts/%s", doorayAPIEndpoint, postId)
+	if projectId != "" {
+		url = fmt.Sprintf("%s/project/v1/projects/%s/posts/%s", doorayAPIEndpoint, projectId, postId)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
@@ -64,6 +82,31 @@ func getURL(ctx context.Context, token, url string) (string, error) {
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("GET %s failed: status %d, body: %s", url, resp.StatusCode, string(body))
+	}
+	return string(body), nil
+}
+
+// deleteURL performs an authenticated DELETE and returns the raw JSON body.
+// Used for endpoints the SDK does not cover (e.g. template deletion).
+func deleteURL(ctx context.Context, token, url string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "dooray-api "+token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("DELETE %s failed: status %d, body: %s", url, resp.StatusCode, string(body))
 	}
 	return string(body), nil
 }
@@ -116,6 +159,92 @@ func postJSON(ctx context.Context, token, url string, payload []byte) (string, e
 		return "", fmt.Errorf("POST %s failed: status %d, body: %s", url, resp.StatusCode, string(body))
 	}
 	return string(body), nil
+}
+
+// uploadPostFile uploads a file to a post via multipart/form-data and returns the
+// raw JSON response (result.id is the uploaded file id). The Dooray file API answers
+// the first request with 307 + a file-api.dooray.com location; Go's default client
+// strips the Authorization header on a cross-host redirect (same reason curl needs
+// --location-trusted), so we disable auto-redirect and re-issue the request to the
+// location ourselves, keeping the auth header and re-reading the file body.
+// fileType is "general" (shows in the attachment list) or "inline_image" (body-only,
+// referenced as ![](/files/{id}) and kept out of the attachment list).
+func uploadPostFile(ctx context.Context, token, projectId, postId, filePath, fileType string) (string, error) {
+	url := fmt.Sprintf("%s/project/v1/projects/%s/posts/%s/files", doorayAPIEndpoint, projectId, postId)
+	return uploadFileMultipart(ctx, token, url, filePath, fileType)
+}
+
+// uploadFileMultipart POSTs a file to a Dooray file endpoint via multipart/form-data
+// and returns the raw JSON response. The form-data order matters: "type" must precede
+// "file". The Dooray file API answers the first request with 307 + a file-api.dooray.com
+// location; Go's default client strips the Authorization header on a cross-host redirect
+// (same reason curl needs --location-trusted), so we disable auto-redirect and re-issue
+// the request to the location ourselves, keeping the auth header and re-reading the file.
+func uploadFileMultipart(ctx context.Context, token, url, filePath, fileType string) (string, error) {
+	buildReq := func(url string) (*http.Request, error) {
+		f, err := os.Open(filePath)
+		if err != nil {
+			return nil, err
+		}
+		defer f.Close()
+
+		var buf bytes.Buffer
+		w := multipart.NewWriter(&buf)
+		if err := w.WriteField("type", fileType); err != nil {
+			return nil, err
+		}
+		fw, err := w.CreateFormFile("file", filepath.Base(filePath))
+		if err != nil {
+			return nil, err
+		}
+		if _, err := io.Copy(fw, f); err != nil {
+			return nil, err
+		}
+		if err := w.Close(); err != nil {
+			return nil, err
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, &buf)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "dooray-api "+token)
+		req.Header.Set("Content-Type", w.FormDataContentType())
+		return req, nil
+	}
+
+	// Don't auto-follow: we must re-attach the auth header + body on the redirect host.
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+
+	for i := 0; i < 2; i++ { // at most one redirect hop
+		req, err := buildReq(url)
+		if err != nil {
+			return "", err
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return "", err
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return "", err
+		}
+		if resp.StatusCode == http.StatusTemporaryRedirect {
+			loc := resp.Header.Get("Location")
+			if loc == "" {
+				return "", fmt.Errorf("upload got 307 with no Location header")
+			}
+			url = loc
+			continue
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return "", fmt.Errorf("upload %s failed: status %d, body: %s", url, resp.StatusCode, string(body))
+		}
+		return string(body), nil
+	}
+	return "", fmt.Errorf("upload exceeded redirect limit")
 }
 
 // recipientWorkflow is the inline workflow field observed on closed posts:
@@ -206,12 +335,11 @@ func postTools(s *server.MCPServer, token *string) {
 		mcp.WithDescription("find dooray posts in projects"),
 		mcp.WithString("operation",
 			mcp.Required(),
-			mcp.Description("The operation to perform. 'find_posts': list posts with filters. 'get_post': get a single post with full body (requires postId). 'create_post': create a new post (requires subject, bodyContent). 'update_post': FULL-REPLACEMENT edit of a post (requires postId, subject, bodyContent — any field not resent is cleared; fetch current subject/body via get_post first). 'set_workflow': change a post's status/workflow (requires postId, setWorkflowId). 'create_log': add a comment/log to a post (requires postId, logContent). 'get_logs': list a post's comments/logs (requires postId)."),
-			mcp.Enum("find_posts", "get_post", "create_post", "update_post", "set_workflow", "create_log", "get_logs"),
+			mcp.Description("The operation to perform. 'find_posts': list posts with filters. 'get_post': get a single post with full body (requires postId). 'create_post': create a new post (requires subject, bodyContent). 'update_post': FULL-REPLACEMENT edit of a post (requires postId, subject, and body via either bodyContent or bodyFilePath — any field not resent is cleared; fetch current subject/body via get_post first. For large bodies, save get_post output to a file, edit a few lines, and pass bodyFilePath to avoid re-emitting the whole body). 'set_workflow': change a post's status/workflow (requires postId, setWorkflowId). 'create_log': add a comment/log to a post (requires postId, logContent). 'get_logs': list a post's comments/logs (requires postId). 'delete_log': delete a comment/log (requires postId, logId — irreversible, TWO-STEP: the 1st call WITHOUT confirmToken deletes nothing and returns the comment preview + a one-time confirmToken; you MUST show the preview to the user and get their explicit approval, then call again WITH that confirmToken to actually delete. Never fabricate a confirmToken or skip the user approval). 'upload_inline_image': upload a local image file to a post (requires postId, filePath) and return {fileId, markdown}; paste the markdown into a body/comment to render it inline. Default fileType=inline_image (kept out of the attachment list); use fileType=general to also show it in attachments."),
+			mcp.Enum("find_posts", "get_post", "create_post", "update_post", "set_workflow", "create_log", "get_logs", "delete_log", "upload_inline_image"),
 		),
 		mcp.WithString("projectId",
-			mcp.Required(),
-			mcp.Description("project id, it can be a single id or a comma separated list of projectIds. it can be obtained from the find_projects tool. for get_post it must be a single id"),
+			mcp.Description("project id, it can be a single id or a comma separated list of projectIds. it can be obtained from the find_projects tool. Required for every operation EXCEPT get_post: get_post works with postId alone (the share URL https://.../project/tasks/{postId} exposes only postId), and the response's result.project.id gives you the projectId for any follow-up call."),
 		),
 		// get_post fields
 		mcp.WithString("postId",
@@ -223,6 +351,9 @@ func postTools(s *server.MCPServer, token *string) {
 		),
 		mcp.WithString("bodyContent",
 			mcp.Description("post body markdown/html content (required for create_post)"),
+		),
+		mcp.WithString("bodyFilePath",
+			mcp.Description("update_post/create_post only: absolute path to a local file whose contents become the body. Use INSTEAD of bodyContent to avoid re-emitting a large body inline (e.g. save get_post output to a file, edit a few lines, pass the path). If both are given, bodyFilePath wins."),
 		),
 		mcp.WithString("bodyMimeType",
 			mcp.Description("post body mime type for create_post: 'text/x-markdown' (default) or 'text/html'"),
@@ -248,6 +379,13 @@ func postTools(s *server.MCPServer, token *string) {
 		mcp.WithString("workflowId",
 			mcp.Description("workflow id for create_post"),
 		),
+		// upload_inline_image
+		mcp.WithString("filePath",
+			mcp.Description("absolute path to a local image file to upload (required for upload_inline_image)"),
+		),
+		mcp.WithString("fileType",
+			mcp.Description("upload_inline_image only: 'inline_image' (default, body-only) or 'general' (also shows in attachment list)"),
+		),
 		// set_workflow
 		mcp.WithString("setWorkflowId",
 			mcp.Description("target workflow id for set_workflow (the post's new status). Required for set_workflow."),
@@ -258,6 +396,13 @@ func postTools(s *server.MCPServer, token *string) {
 		),
 		mcp.WithString("logMimeType",
 			mcp.Description("mime type for create_log body: 'text/x-markdown' (default) or 'text/html'"),
+		),
+		// delete_log
+		mcp.WithString("logId",
+			mcp.Description("comment/log id (required for delete_log). It can be obtained from get_logs."),
+		),
+		mcp.WithString("confirmToken",
+			mcp.Description("delete_log 2nd call only: the one-time token returned by the 1st delete_log call. Only pass it after the user explicitly approved the deletion of the previewed comment. Never fabricate it."),
 		),
 		// update_post
 		mcp.WithString("toMemberWorkflowId",
@@ -325,7 +470,7 @@ func postTools(s *server.MCPServer, token *string) {
 
 	s.AddTool(doorayPostTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		op := request.GetArguments()["operation"].(string)
-		projectId := request.GetArguments()["projectId"].(string)
+		projectId, _ := request.GetArguments()["projectId"].(string) // optional for get_post (share URL has only postId)
 
 		opts := project.GetPostsOptions{}
 
@@ -394,6 +539,11 @@ func postTools(s *server.MCPServer, token *string) {
 			opts.Order = v
 		}
 
+		// get_post는 공유 URL의 postId만으로 동작하므로 projectId가 비어도 된다. 그 외 op은 projectId 필수.
+		if projectId == "" && op != "get_post" {
+			return mcp.NewToolResultError("projectId is required for " + op), nil
+		}
+
 		var result string
 		switch op {
 		case "find_posts":
@@ -415,8 +565,15 @@ func postTools(s *server.MCPServer, token *string) {
 		case "create_post":
 			subject, _ := request.GetArguments()["subject"].(string)
 			bodyContent, _ := request.GetArguments()["bodyContent"].(string)
+			if p, _ := request.GetArguments()["bodyFilePath"].(string); p != "" {
+				b, err := os.ReadFile(p)
+				if err != nil {
+					return mcp.NewToolResultError(fmt.Sprintf("bodyFilePath read failed: %v", err)), nil
+				}
+				bodyContent = string(b)
+			}
 			if subject == "" || bodyContent == "" {
-				return mcp.NewToolResultError("subject and bodyContent are required for create_post"), nil
+				return mcp.NewToolResultError("subject and (bodyContent or bodyFilePath) are required for create_post"), nil
 			}
 			bodyMimeType, _ := request.GetArguments()["bodyMimeType"].(string)
 			if bodyMimeType == "" {
@@ -427,7 +584,7 @@ func postTools(s *server.MCPServer, token *string) {
 				Subject: subject,
 				Body: model.PostBody{
 					MimeType: bodyMimeType,
-					Content:  bodyContent,
+					Content:  linkifyDoorayURLs(*token, bodyMimeType, bodyContent),
 				},
 			}
 
@@ -515,7 +672,7 @@ func postTools(s *server.MCPServer, token *string) {
 				logMimeType = "text/x-markdown"
 			}
 			payload, err := json.Marshal(map[string]any{
-				"body": model.PostBody{MimeType: logMimeType, Content: logContent},
+				"body": model.PostBody{MimeType: logMimeType, Content: linkifyDoorayURLs(*token, logMimeType, logContent)},
 			})
 			if err != nil {
 				return nil, err
@@ -545,12 +702,58 @@ func postTools(s *server.MCPServer, token *string) {
 				return nil, err
 			}
 			result = res
+		case "delete_log":
+			postId, _ := request.GetArguments()["postId"].(string)
+			logId, _ := request.GetArguments()["logId"].(string)
+			if postId == "" || logId == "" {
+				return mcp.NewToolResultError("postId and logId are required for delete_log"), nil
+			}
+			logURL := fmt.Sprintf("%s/project/v1/projects/%s/posts/%s/logs/%s", doorayAPIEndpoint, projectId, postId, logId)
+			confirmToken, _ := request.GetArguments()["confirmToken"].(string)
+			if confirmToken == "" {
+				// 1차 호출: 삭제하지 않는다. 미리보기와 1회용 토큰만 발급한다.
+				preview, err := getURL(ctx, *token, logURL)
+				if err != nil {
+					return nil, err
+				}
+				buf := make([]byte, 4)
+				if _, err := rand.Read(buf); err != nil {
+					return nil, err
+				}
+				issued := hex.EncodeToString(buf)
+				deleteLogTokensMu.Lock()
+				deleteLogTokens[issued] = logURL
+				deleteLogTokensMu.Unlock()
+				result = fmt.Sprintf("NOT DELETED YET. Show the comment below to the user and get their explicit approval. Only after they approve, call delete_log again with confirmToken=%s. If they decline, do not call again.\n%s", issued, preview)
+			} else {
+				deleteLogTokensMu.Lock()
+				stored, ok := deleteLogTokens[confirmToken]
+				if ok && stored == logURL {
+					delete(deleteLogTokens, confirmToken) // 1회용: 성공 여부와 무관하게 소진
+				}
+				deleteLogTokensMu.Unlock()
+				if !ok || stored != logURL {
+					return mcp.NewToolResultError("invalid or already-used confirmToken. Call delete_log without confirmToken to get a fresh preview and token, then get user approval again."), nil
+				}
+				res, err := deleteURL(ctx, *token, logURL)
+				if err != nil {
+					return nil, err
+				}
+				result = fmt.Sprintf("deleted log %s\n%s", logId, res)
+			}
 		case "update_post":
 			postId, _ := request.GetArguments()["postId"].(string)
 			subject, _ := request.GetArguments()["subject"].(string)
 			bodyContent, _ := request.GetArguments()["bodyContent"].(string)
+			if p, _ := request.GetArguments()["bodyFilePath"].(string); p != "" {
+				b, err := os.ReadFile(p)
+				if err != nil {
+					return mcp.NewToolResultError(fmt.Sprintf("bodyFilePath read failed: %v", err)), nil
+				}
+				bodyContent = string(b)
+			}
 			if postId == "" || subject == "" || bodyContent == "" {
-				return mcp.NewToolResultError("postId, subject and bodyContent are required for update_post (PUT is full-replacement; resend subject+body fetched via get_post or they are cleared)"), nil
+				return mcp.NewToolResultError("postId, subject and (bodyContent or bodyFilePath) are required for update_post (PUT is full-replacement; resend subject+body fetched via get_post or they are cleared)"), nil
 			}
 			bodyMimeType, _ := request.GetArguments()["bodyMimeType"].(string)
 			if bodyMimeType == "" {
@@ -559,7 +762,7 @@ func postTools(s *server.MCPServer, token *string) {
 
 			upd := updatePostRequest{
 				Subject: subject,
-				Body:    model.PostBody{MimeType: bodyMimeType, Content: bodyContent},
+				Body:    model.PostBody{MimeType: bodyMimeType, Content: linkifyDoorayURLs(*token, bodyMimeType, bodyContent)},
 			}
 			if v, _ := request.GetArguments()["priority"].(string); v != "" {
 				upd.Priority = v
@@ -609,6 +812,33 @@ func postTools(s *server.MCPServer, token *string) {
 				return nil, err
 			}
 			result = res
+		case "upload_inline_image":
+			postId, _ := request.GetArguments()["postId"].(string)
+			filePath, _ := request.GetArguments()["filePath"].(string)
+			if postId == "" || filePath == "" {
+				return mcp.NewToolResultError("postId and filePath are required for upload_inline_image"), nil
+			}
+			fileType, _ := request.GetArguments()["fileType"].(string)
+			if fileType == "" {
+				fileType = "inline_image"
+			}
+			res, err := uploadPostFile(ctx, *token, projectId, postId, filePath, fileType)
+			if err != nil {
+				return nil, err
+			}
+			// Parse result.id and hand back a ready-to-paste markdown snippet so the
+			// caller can drop it into a post body or comment via update_post/create_log.
+			var parsed struct {
+				Result struct {
+					ID string `json:"id"`
+				} `json:"result"`
+			}
+			if err := json.Unmarshal([]byte(res), &parsed); err != nil || parsed.Result.ID == "" {
+				return nil, fmt.Errorf("upload succeeded but could not parse file id from response: %s", res)
+			}
+			markdown := fmt.Sprintf("![%s](/files/%s)", filepath.Base(filePath), parsed.Result.ID)
+			out, _ := json.Marshal(map[string]string{"fileId": parsed.Result.ID, "markdown": markdown})
+			result = string(out)
 		}
 		return mcp.NewToolResultText(result), nil
 	})
