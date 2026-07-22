@@ -165,7 +165,7 @@ func driveUploadMultipart(ctx context.Context, token, uploadURL, fileName string
 		if err != nil {
 			return "", err
 		}
-		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		if resp.StatusCode == http.StatusTemporaryRedirect {
 			loc := resp.Header.Get("Location")
 			if loc == "" {
 				return "", fmt.Errorf("drive upload redirect without Location header: status %d", resp.StatusCode)

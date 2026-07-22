@@ -30,7 +30,7 @@ func MessengerTools(s *server.MCPServer, token *string) {
 			mcp.Description("recipient organizationMemberId (required for 'send')"),
 		),
 		mcp.WithString("message",
-			mcp.Description("message to send (required for 'send' and 'send_channel')"),
+			mcp.Description("message to send (required for 'send', 'send_channel', and 'send_webhook')"),
 		),
 		mcp.WithString("channelId",
 			mcp.Description("channel id (required for 'send_channel', 'reply_thread', and 'find_channel_logs')"),
