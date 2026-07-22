@@ -62,3 +62,54 @@ func TestDriveFindFoldersMissingArgs(t *testing.T) {
 		}
 	}
 }
+
+func TestDriveUploadFileMissingArgs(t *testing.T) {
+	s := newTestServer()
+	token := "invalid-token"
+	DriveTools(s, &token)
+
+	tool := s.ListTools()["dooray_drive"]
+	cases := []map[string]any{
+		{"operation": "upload_file", "parentId": "p-1", "filePath": "/tmp/x.txt"},              // no driveId
+		{"operation": "upload_file", "driveId": "d-1", "filePath": "/tmp/x.txt"},                // no parentId
+		{"operation": "upload_file", "driveId": "d-1", "parentId": "p-1"},                       // no filePath
+	}
+	for i, args := range cases {
+		req := mcp.CallToolRequest{
+			Params: mcp.CallToolParams{Name: "dooray_drive", Arguments: args},
+		}
+		res, err := tool.Handler(context.Background(), req)
+		if err != nil {
+			t.Fatalf("case %d: unexpected error: %v", i, err)
+		}
+		if res == nil || !res.IsError {
+			t.Fatalf("case %d: expected error result for missing required arg", i)
+		}
+	}
+}
+
+func TestDriveUploadContentMissingArgs(t *testing.T) {
+	s := newTestServer()
+	token := "invalid-token"
+	DriveTools(s, &token)
+
+	tool := s.ListTools()["dooray_drive"]
+	cases := []map[string]any{
+		{"operation": "upload_content", "parentId": "p-1", "fileName": "a.md", "content": "hi"}, // no driveId
+		{"operation": "upload_content", "driveId": "d-1", "fileName": "a.md", "content": "hi"},  // no parentId
+		{"operation": "upload_content", "driveId": "d-1", "parentId": "p-1", "content": "hi"},   // no fileName
+		{"operation": "upload_content", "driveId": "d-1", "parentId": "p-1", "fileName": "a.md"}, // no content
+	}
+	for i, args := range cases {
+		req := mcp.CallToolRequest{
+			Params: mcp.CallToolParams{Name: "dooray_drive", Arguments: args},
+		}
+		res, err := tool.Handler(context.Background(), req)
+		if err != nil {
+			t.Fatalf("case %d: unexpected error: %v", i, err)
+		}
+		if res == nil || !res.IsError {
+			t.Fatalf("case %d: expected error result for missing required arg", i)
+		}
+	}
+}
