@@ -37,6 +37,8 @@ func main() {
 
 	WikiTools(s, token)
 
+	DriveTools(s, token)
+
 	// Start the server
 	if err := server.ServeStdio(s); err != nil {
 		fmt.Printf("Server error: %v\n", err)
