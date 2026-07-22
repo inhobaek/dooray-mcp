@@ -238,6 +238,9 @@ func TestValidateWebhookURL(t *testing.T) {
 		{"https://evil.com/services/abc", true},            // wrong host
 		{"https://dooray.com.evil.com/services/abc", true}, // host doesn't end with .dooray.com
 		{"not-a-url", true},
+		{"HTTPS://example.dooray.com/services/abc", false},  // uppercase scheme, url.Parse lowercases it
+		{"https://1.2.3.4/", true},                         // IP literal, not .dooray.com
+		{"example.dooray.com/services/x", true},             // no scheme, treated as relative path
 	}
 	for _, c := range cases {
 		err := validateWebhookURL(c.url)
