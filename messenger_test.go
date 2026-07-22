@@ -209,8 +209,8 @@ func TestMessengerReplyThreadMissingArgs(t *testing.T) {
 	// reply_thread requires channelId, parentMessageId, and message.
 	// Each missing one must yield an error result (not a real API call).
 	cases := []map[string]any{
-		{"operation": "reply_thread", "parentMessageId": "p-1", "message": "hi"}, // no channelId
-		{"operation": "reply_thread", "channelId": "c-1", "message": "hi"},       // no parentMessageId
+		{"operation": "reply_thread", "parentMessageId": "p-1", "message": "hi"},    // no channelId
+		{"operation": "reply_thread", "channelId": "c-1", "message": "hi"},          // no parentMessageId
 		{"operation": "reply_thread", "channelId": "c-1", "parentMessageId": "p-1"}, // no message
 	}
 	for i, args := range cases {
@@ -224,6 +224,78 @@ func TestMessengerReplyThreadMissingArgs(t *testing.T) {
 		if res == nil || !res.IsError {
 			t.Fatalf("case %d: expected error result for missing required arg", i)
 		}
+	}
+}
+
+func TestValidateWebhookURL(t *testing.T) {
+	cases := []struct {
+		url     string
+		wantErr bool
+	}{
+		{"https://example.dooray.com/services/abc", false},
+		{"https://hooks.dooray.com/services/abc", false},
+		{"http://example.dooray.com/services/abc", true},    // http, not https
+		{"https://evil.com/services/abc", true},            // wrong host
+		{"https://dooray.com.evil.com/services/abc", true}, // host doesn't end with .dooray.com
+		{"not-a-url", true},
+	}
+	for _, c := range cases {
+		err := validateWebhookURL(c.url)
+		if c.wantErr && err == nil {
+			t.Errorf("validateWebhookURL(%q): expected error, got nil", c.url)
+		}
+		if !c.wantErr && err != nil {
+			t.Errorf("validateWebhookURL(%q): expected no error, got %v", c.url, err)
+		}
+	}
+}
+
+func TestMessengerSendWebhookMissingArgs(t *testing.T) {
+	s := newTestServer()
+	token := "invalid-token"
+	MessengerTools(s, &token)
+
+	tool := s.ListTools()["dooray_messenger"]
+	cases := []map[string]any{
+		{"operation": "send_webhook", "message": "hi"},                                      // no webhookUrl
+		{"operation": "send_webhook", "webhookUrl": "https://example.dooray.com/services/x"}, // no message
+	}
+	for i, args := range cases {
+		req := mcp.CallToolRequest{
+			Params: mcp.CallToolParams{Name: "dooray_messenger", Arguments: args},
+		}
+		res, err := tool.Handler(context.Background(), req)
+		if err != nil {
+			t.Fatalf("case %d: unexpected error: %v", i, err)
+		}
+		if res == nil || !res.IsError {
+			t.Fatalf("case %d: expected error result for missing required arg", i)
+		}
+	}
+}
+
+func TestMessengerSendWebhookRejectsBadHost(t *testing.T) {
+	s := newTestServer()
+	token := "invalid-token"
+	MessengerTools(s, &token)
+
+	tool := s.ListTools()["dooray_messenger"]
+	req := mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "dooray_messenger",
+			Arguments: map[string]any{
+				"operation":  "send_webhook",
+				"webhookUrl": "https://evil.com/steal",
+				"message":    "hi",
+			},
+		},
+	}
+	res, err := tool.Handler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res == nil || !res.IsError {
+		t.Fatal("expected error result for non-dooray.com webhook host")
 	}
 }
 
