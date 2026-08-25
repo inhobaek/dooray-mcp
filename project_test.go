@@ -256,6 +256,32 @@ func TestProjectToolMissingScope(t *testing.T) {
 	tool.Handler(context.Background(), req)
 }
 
+func TestProjectToolTagOpsMissingArgs(t *testing.T) {
+	s := newTestServer()
+	token := "invalid-token"
+	ProjectTools(s, &token)
+
+	tool := s.ListTools()["dooray_project"]
+
+	// projectId 없는 get_tags, tagName 없는 create_tag 모두 에러 결과를 반환해야 함
+	for _, args := range []map[string]any{
+		{"operation": "get_tags"},
+		{"operation": "create_tag", "projectId": "123"},
+		{"operation": "create_tag", "tagName": "팀: DevOps팀"},
+	} {
+		req := mcp.CallToolRequest{
+			Params: mcp.CallToolParams{Name: "dooray_project", Arguments: args},
+		}
+		res, err := tool.Handler(context.Background(), req)
+		if err != nil {
+			t.Fatalf("unexpected handler error for %v: %v", args, err)
+		}
+		if res == nil || !res.IsError {
+			t.Errorf("expected error result for %v, got %+v", args, res)
+		}
+	}
+}
+
 func TestProjectToolCount(t *testing.T) {
 	s := newTestServer()
 	token := "test-token"
@@ -553,6 +579,37 @@ func TestDeleteLogGuards(t *testing.T) {
 		t.Error("expected error when logId is missing")
 	}
 	if res := call(map[string]any{"postId": "2", "logId": "3", "confirmToken": "deadbeef"}); !res.IsError {
+		t.Error("expected error for a confirmToken that was never issued")
+	}
+}
+
+// delete_file 2단계 확인 가드: 필수 인자 누락과 위조 토큰은 네트워크를 타지 않고 에러여야 한다.
+func TestDeleteFileGuards(t *testing.T) {
+	s := newTestServer()
+	token := "invalid-token"
+	ProjectTools(s, &token)
+
+	tool, ok := s.ListTools()["dooray_posts"]
+	if !ok {
+		t.Fatal("dooray_posts tool not registered")
+	}
+
+	call := func(args map[string]any) *mcp.CallToolResult {
+		args["operation"] = "delete_file"
+		args["projectId"] = "1"
+		res, err := tool.Handler(context.Background(), mcp.CallToolRequest{
+			Params: mcp.CallToolParams{Name: "dooray_posts", Arguments: args},
+		})
+		if err != nil {
+			t.Fatalf("handler error: %v", err)
+		}
+		return res
+	}
+
+	if res := call(map[string]any{"postId": "2"}); !res.IsError {
+		t.Error("expected error when fileId is missing")
+	}
+	if res := call(map[string]any{"postId": "2", "fileId": "3", "confirmToken": "deadbeef"}); !res.IsError {
 		t.Error("expected error for a confirmToken that was never issued")
 	}
 }

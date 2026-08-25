@@ -23,11 +23,20 @@ import (
 
 const doorayAPIEndpoint = "https://api.dooray.com"
 
-// delete_log 2단계 확인: 1차 호출이 발급한 1회용 토큰이 있어야만 실제 삭제한다.
+// delete_log/delete_file 2단계 확인: 1차 호출이 발급한 1회용 토큰이 있어야만 실제 삭제한다.
 // ponytail: 프로세스 메모리 저장, stdio 단일 프로세스 MCP라 충분. 만료는 1회용 소진으로 갈음.
 var (
 	deleteLogTokensMu sync.Mutex
 	deleteLogTokens   = map[string]string{} // token -> projectId/postId/logId
+
+	deletePostFileTokensMu sync.Mutex
+	deletePostFileTokens   = map[string]string{} // token -> projectId/postId/fileId URL
+
+	deleteWikiFileTokensMu sync.Mutex
+	deleteWikiFileTokens   = map[string]string{} // token -> wikiId/pageId/fileId URL
+
+	deleteWikiPageTokensMu sync.Mutex
+	deleteWikiPageTokens   = map[string]string{} // token -> wikiId/pageId URL
 )
 
 // getPost fetches a single post directly via the Dooray REST API
@@ -284,47 +293,91 @@ func ProjectTools(s *server.MCPServer, token *string) {
 
 func projectTools(s *server.MCPServer, token *string) {
 	doorayPostTool := mcp.NewTool("dooray_project",
-		mcp.WithDescription("find dooray projects"),
+		mcp.WithDescription("find dooray projects and manage project tags"),
 		mcp.WithString("operation",
 			mcp.Required(),
-			mcp.Description("The operation to perform (find projects)"),
-			mcp.Enum("find_projects"),
+			mcp.Description("The operation to perform. 'find_projects': list projects (uses type, state, scope). 'get_tags': list a project's tags (requires projectId). 'create_tag': create a tag in a project (requires projectId, tagName; optional tagColor) — the response's result.id is usable as tagIdsCreate in dooray_posts create_post."),
+			mcp.Enum("find_projects", "get_tags", "create_tag"),
 		),
 		mcp.WithString("type",
-			mcp.Required(),
-			mcp.Description("project type, it can be either 'public' or 'private', default is 'public', it can not be 'all' to get all projects. "),
+			mcp.Description("find_projects only: project type, it can be either 'public' or 'private', default is 'public', it can not be 'all' to get all projects. "),
 		),
 		mcp.WithString("state",
-			mcp.Required(),
-			mcp.Description("project state, it can be either 'active' or 'archived', default is 'active'"),
+			mcp.Description("find_projects only: project state, it can be either 'active' or 'archived', default is 'active'"),
 		),
 		mcp.WithString("scope",
-			mcp.Required(),
 			mcp.Description(
-				`project state, it can be either 'private' or 'public', default is 'private',
+				`find_projects only: project scope, it can be either 'private' or 'public', default is 'private',
 				'private' - only the project member can see it,
 				'public' - all users can see the project,
 				it can not be 'all' to get all projects
 `),
 		),
+		mcp.WithString("projectId",
+			mcp.Description("project id (required for get_tags, create_tag). it can be obtained from find_projects"),
+		),
+		mcp.WithString("tagName",
+			mcp.Description("tag name for create_tag. Some projects enforce a 'prefix: value' naming rule — the API rejects names that violate it."),
+		),
+		mcp.WithString("tagColor",
+			mcp.Description("create_tag only: 6-digit hex RGB without '#', e.g. 'F05121'. Default '9E9E9E' (gray)."),
+		),
 	)
 
-	// Add the calculator handler
 	s.AddTool(doorayPostTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		op := request.GetArguments()["operation"].(string)
-		projectType := request.GetArguments()["type"].(string)
-		scope := request.GetArguments()["scope"].(string)
-		state := request.GetArguments()["state"].(string)
 
 		var result string
 		switch op {
 		case "find_projects":
-			var err error
+			projectType, _ := request.GetArguments()["type"].(string)
+			scope, _ := request.GetArguments()["scope"].(string)
+			state, _ := request.GetArguments()["state"].(string)
+			if projectType == "" {
+				projectType = "public"
+			}
+			if scope == "" {
+				scope = "private"
+			}
+			if state == "" {
+				state = "active"
+			}
 			res, err := project.NewDefaultProject().GetProjects(*token, projectType, scope, state)
 			if err != nil {
 				return nil, err
 			}
 			result = res.RawJSON
+		case "get_tags":
+			projectId, _ := request.GetArguments()["projectId"].(string)
+			if projectId == "" {
+				return mcp.NewToolResultError("projectId is required for get_tags"), nil
+			}
+			url := fmt.Sprintf("%s/project/v1/projects/%s/tags", doorayAPIEndpoint, projectId)
+			res, err := getURL(ctx, *token, url)
+			if err != nil {
+				return nil, err
+			}
+			result = res
+		case "create_tag":
+			projectId, _ := request.GetArguments()["projectId"].(string)
+			tagName, _ := request.GetArguments()["tagName"].(string)
+			if projectId == "" || tagName == "" {
+				return mcp.NewToolResultError("projectId and tagName are required for create_tag"), nil
+			}
+			tagColor, _ := request.GetArguments()["tagColor"].(string)
+			if tagColor == "" {
+				tagColor = "9E9E9E"
+			}
+			payload, err := json.Marshal(map[string]string{"name": tagName, "color": tagColor})
+			if err != nil {
+				return nil, err
+			}
+			url := fmt.Sprintf("%s/project/v1/projects/%s/tags", doorayAPIEndpoint, projectId)
+			res, err := postJSON(ctx, *token, url, payload)
+			if err != nil {
+				return nil, err
+			}
+			result = res
 		}
 		return mcp.NewToolResultText(result), nil
 	})
@@ -335,8 +388,8 @@ func postTools(s *server.MCPServer, token *string) {
 		mcp.WithDescription("find dooray posts in projects"),
 		mcp.WithString("operation",
 			mcp.Required(),
-			mcp.Description("The operation to perform. 'find_posts': list posts with filters. 'get_post': get a single post with full body (requires postId). 'create_post': create a new post (requires subject, bodyContent). 'update_post': FULL-REPLACEMENT edit of a post (requires postId, subject, and body via either bodyContent or bodyFilePath — any field not resent is cleared; fetch current subject/body via get_post first. For large bodies, save get_post output to a file, edit a few lines, and pass bodyFilePath to avoid re-emitting the whole body). 'set_workflow': change a post's status/workflow (requires postId, setWorkflowId). 'create_log': add a comment/log to a post (requires postId, logContent). 'get_logs': list a post's comments/logs (requires postId). 'delete_log': delete a comment/log (requires postId, logId — irreversible, TWO-STEP: the 1st call WITHOUT confirmToken deletes nothing and returns the comment preview + a one-time confirmToken; you MUST show the preview to the user and get their explicit approval, then call again WITH that confirmToken to actually delete. Never fabricate a confirmToken or skip the user approval). 'upload_inline_image': upload a local image file to a post (requires postId, filePath) and return {fileId, markdown}; paste the markdown into a body/comment to render it inline. Default fileType=inline_image (kept out of the attachment list); use fileType=general to also show it in attachments."),
-			mcp.Enum("find_posts", "get_post", "create_post", "update_post", "set_workflow", "create_log", "get_logs", "delete_log", "upload_inline_image"),
+			mcp.Description("The operation to perform. 'find_posts': list posts with filters. 'get_post': get a single post with full body (requires postId). 'create_post': create a new post (requires subject, bodyContent). 'update_post': FULL-REPLACEMENT edit of a post (requires postId, subject, and body via either bodyContent or bodyFilePath — any field not resent is cleared. ALWAYS call get_post immediately before every update_post and build the new body by editing THAT response. Never build it from an earlier copy, your own memory of the body, or a fresh template render: someone may have edited the post in the Dooray web UI since you last read it, and this full-replacement PUT silently discards their edits along with any inline images and attachment links. Re-fetch even when you updated the same post minutes ago in this same session. For large bodies, save the fresh get_post output to a file, edit a few lines, and pass bodyFilePath to avoid re-emitting the whole body). 'set_workflow': change a post's status/workflow (requires postId, setWorkflowId). 'create_log': add a comment/log to a post (requires postId, logContent). 'get_logs': list a post's comments/logs (requires postId). 'delete_log': delete a comment/log (requires postId, logId — irreversible, TWO-STEP: the 1st call WITHOUT confirmToken deletes nothing and returns the comment preview + a one-time confirmToken; you MUST show the preview to the user and get their explicit approval, then call again WITH that confirmToken to actually delete. Never fabricate a confirmToken or skip the user approval). 'upload_inline_image': upload a local image file to a post (requires postId, filePath) and return {fileId, markdown}; paste the markdown into a body/comment to render it inline. Default fileType=inline_image (kept out of the attachment list); use fileType=general to also show it in attachments. 'delete_file': delete a file attached to a post — whether uploaded via upload_inline_image or via the Dooray web UI (requires postId, fileId — get fileId from get_post's result.files array). This does NOT edit the body text: if the file is still referenced by a markdown/img tag in the body, remove that reference yourself via update_post (before or after deleting), or the post will show a broken image link. Irreversible, TWO-STEP like delete_log: the 1st call WITHOUT confirmToken deletes nothing and returns the file name/size preview + a one-time confirmToken; show it to the user and get explicit approval before calling again WITH confirmToken. Never fabricate a confirmToken or skip the user approval."),
+			mcp.Enum("find_posts", "get_post", "create_post", "update_post", "set_workflow", "create_log", "get_logs", "delete_log", "upload_inline_image", "delete_file"),
 		),
 		mcp.WithString("projectId",
 			mcp.Description("project id, it can be a single id or a comma separated list of projectIds. it can be obtained from the find_projects tool. Required for every operation EXCEPT get_post: get_post works with postId alone (the share URL https://.../project/tasks/{postId} exposes only postId), and the response's result.project.id gives you the projectId for any follow-up call."),
@@ -402,7 +455,11 @@ func postTools(s *server.MCPServer, token *string) {
 			mcp.Description("comment/log id (required for delete_log). It can be obtained from get_logs."),
 		),
 		mcp.WithString("confirmToken",
-			mcp.Description("delete_log 2nd call only: the one-time token returned by the 1st delete_log call. Only pass it after the user explicitly approved the deletion of the previewed comment. Never fabricate it."),
+			mcp.Description("delete_log/delete_file 2nd call only: the one-time token returned by the 1st call of that SAME operation. Only pass it after the user explicitly approved the deletion of the previewed comment/file. Never fabricate it. Tokens from delete_log and delete_file are not interchangeable."),
+		),
+		// delete_file
+		mcp.WithString("fileId",
+			mcp.Description("attachment file id (required for delete_file). Get it from get_post's result.files array."),
 		),
 		// update_post
 		mcp.WithString("toMemberWorkflowId",
@@ -740,6 +797,64 @@ func postTools(s *server.MCPServer, token *string) {
 					return nil, err
 				}
 				result = fmt.Sprintf("deleted log %s\n%s", logId, res)
+			}
+		case "delete_file":
+			postId, _ := request.GetArguments()["postId"].(string)
+			fileId, _ := request.GetArguments()["fileId"].(string)
+			if postId == "" || fileId == "" {
+				return mcp.NewToolResultError("postId and fileId are required for delete_file"), nil
+			}
+			// Dooray's REST API exposes this DELETE endpoint but the mcp-go server (and the
+			// official dooray-sdk) does not wrap it; confirmed working via raw curl against
+			// project/v1/projects/{projectId}/posts/{postId}/files/{fileId} (2026-08-25).
+			fileURL := fmt.Sprintf("%s/project/v1/projects/%s/posts/%s/files/%s", doorayAPIEndpoint, projectId, postId, fileId)
+			confirmToken, _ := request.GetArguments()["confirmToken"].(string)
+			if confirmToken == "" {
+				// 1차 호출: 삭제하지 않는다. get_post의 files 목록에서 이름·크기를 찾아 미리보기로 보여주고 1회용 토큰을 발급한다.
+				preview := fileId
+				if postData, perr := getPost(ctx, *token, projectId, postId); perr == nil {
+					var parsed struct {
+						Result struct {
+							Files []struct {
+								Id   string `json:"id"`
+								Name string `json:"name"`
+								Size int64  `json:"size"`
+							} `json:"files"`
+						} `json:"result"`
+					}
+					if json.Unmarshal([]byte(postData), &parsed) == nil {
+						for _, f := range parsed.Result.Files {
+							if f.Id == fileId {
+								preview = fmt.Sprintf("%s (id=%s, %d bytes)", f.Name, f.Id, f.Size)
+								break
+							}
+						}
+					}
+				}
+				buf := make([]byte, 4)
+				if _, err := rand.Read(buf); err != nil {
+					return nil, err
+				}
+				issued := hex.EncodeToString(buf)
+				deletePostFileTokensMu.Lock()
+				deletePostFileTokens[issued] = fileURL
+				deletePostFileTokensMu.Unlock()
+				result = fmt.Sprintf("NOT DELETED YET. Show the file below to the user and get their explicit approval. Only after they approve, call delete_file again with confirmToken=%s. If they decline, do not call again.\nfile: %s", issued, preview)
+			} else {
+				deletePostFileTokensMu.Lock()
+				stored, ok := deletePostFileTokens[confirmToken]
+				if ok && stored == fileURL {
+					delete(deletePostFileTokens, confirmToken) // 1회용: 성공 여부와 무관하게 소진
+				}
+				deletePostFileTokensMu.Unlock()
+				if !ok || stored != fileURL {
+					return mcp.NewToolResultError("invalid or already-used confirmToken. Call delete_file without confirmToken to get a fresh preview and token, then get user approval again."), nil
+				}
+				res, err := deleteURL(ctx, *token, fileURL)
+				if err != nil {
+					return nil, err
+				}
+				result = fmt.Sprintf("deleted file %s\n%s", fileId, res)
 			}
 		case "update_post":
 			postId, _ := request.GetArguments()["postId"].(string)
