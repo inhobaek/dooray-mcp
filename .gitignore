@@ -4,12 +4,14 @@ build/dooray.*
 dist/
 .mcp.json
 # 빌드 산출물(로컬 빌드)
-dooray_mcp
+/dooray_mcp
 /dooray-mcp
 
 # OS 메타데이터
 .DS_Store
 
-# 개인 용도 참고자료 (워크스페이스 노트, 비공개)
-/customize/
+# 로컬 환경 설정 (커밋 금지)
+.env
+.env.*
+*.credentials
 .claude/settings.local.json
