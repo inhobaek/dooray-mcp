@@ -145,3 +145,25 @@ func slimProjects(raw string) string {
 		return pick(m, "id", "code", "name", "type", "scope", "state", "description")
 	})
 }
+
+// slimLogs: get_logs 결과에서 since(RFC3339)보다 오래된 댓글을 버린다. 필드는 그대로 둔다(본문이 대부분이라 줄일 게 없다).
+func slimLogs(raw, since string) string {
+	return slimJSON(raw, func(m map[string]any) map[string]any {
+		if str(m["createdAt"]) < since {
+			return nil
+		}
+		return m
+	})
+}
+
+// emptyDespiteTotal: totalCount>0인데 result가 비면 Dooray가 속도 제한으로 빈 페이지를 준 것이다(dooray-cli ADR-037 실측).
+func emptyDespiteTotal(raw string) bool {
+	var env struct {
+		TotalCount int   `json:"totalCount"`
+		Result     []any `json:"result"`
+	}
+	if json.Unmarshal([]byte(raw), &env) != nil {
+		return false
+	}
+	return env.TotalCount > 0 && len(env.Result) == 0
+}

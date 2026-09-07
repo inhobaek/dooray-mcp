@@ -296,8 +296,8 @@ func projectTools(s *server.MCPServer, token *string) {
 		mcp.WithDescription("find dooray projects and manage project tags"),
 		mcp.WithString("operation",
 			mcp.Required(),
-			mcp.Description("The operation to perform. 'find_projects': list projects (uses type, state, scope). 'get_tags': list a project's tags (requires projectId). 'create_tag': create a tag in a project (requires projectId, tagName; optional tagColor) — the response's result.id is usable as tagIdsCreate in dooray_posts create_post."),
-			mcp.Enum("find_projects", "get_tags", "create_tag"),
+			mcp.Description("The operation to perform. 'find_projects': list projects (uses type, state, scope). 'get_tags': list a project's tags (requires projectId). 'get_workflows': list a project's workflows/statuses with ids and classes (requires projectId) — use the id as setWorkflowId in dooray_posts set_workflow. 'create_tag': create a tag in a project (requires projectId, tagName; optional tagColor) — the response's result.id is usable as tagIdsCreate in dooray_posts create_post."),
+			mcp.Enum("find_projects", "get_tags", "create_tag", "get_workflows"),
 		),
 		mcp.WithString("type",
 			mcp.Description("find_projects only: project type, it can be either 'public' or 'private', default is 'public', it can not be 'all' to get all projects. "),
@@ -317,7 +317,7 @@ func projectTools(s *server.MCPServer, token *string) {
 `),
 		),
 		mcp.WithString("projectId",
-			mcp.Description("project id (required for get_tags, create_tag). it can be obtained from find_projects"),
+			mcp.Description("project id (required for get_tags, create_tag, get_workflows). it can be obtained from find_projects"),
 		),
 		mcp.WithString("tagName",
 			mcp.Description("tag name for create_tag. Some projects enforce a 'prefix: value' naming rule — the API rejects names that violate it."),
@@ -353,12 +353,12 @@ func projectTools(s *server.MCPServer, token *string) {
 			if raw, _ := request.GetArguments()["raw"].(bool); !raw {
 				result = slimProjects(res.RawJSON)
 			}
-		case "get_tags":
+		case "get_tags", "get_workflows":
 			projectId, _ := request.GetArguments()["projectId"].(string)
 			if projectId == "" {
-				return mcp.NewToolResultError("projectId is required for get_tags"), nil
+				return mcp.NewToolResultError("projectId is required for " + op), nil
 			}
-			url := fmt.Sprintf("%s/project/v1/projects/%s/tags", doorayAPIEndpoint, projectId)
+			url := fmt.Sprintf("%s/project/v1/projects/%s/%s", doorayAPIEndpoint, projectId, strings.TrimPrefix(op, "get_"))
 			res, err := getURL(ctx, *token, url)
 			if err != nil {
 				return nil, err
@@ -475,6 +475,9 @@ func postTools(s *server.MCPServer, token *string) {
 			mcp.Description("update_post only: attaches an inline workflow.id to each assignee in toMemberIdsCreate. NOTE: Dooray ignores this inline workflow on the update PUT (verified) — use the separate set_workflow operation to change status. Kept for completeness; normally leave empty."),
 		),
 		// Paging
+		mcp.WithString("since",
+			mcp.Description("get_logs only: drop comments whose createdAt is older than this RFC3339 time. Combine with order=-createdAt and a size large enough to reach that time"),
+		),
 		mcp.WithNumber("page",
 			mcp.Description("page number, default is 0"),
 		),
@@ -530,7 +533,7 @@ func postTools(s *server.MCPServer, token *string) {
 		),
 		// Sort
 		mcp.WithString("order",
-			mcp.Description("sort order: postDueAt, postUpdatedAt, createdAt (prefix with - for descending, e.g. -createdAt)"),
+			mcp.Description("sort order: postDueAt, postUpdatedAt, createdAt (prefix with - for descending, e.g. -createdAt). get_logs accepts createdAt or -createdAt (default createdAt)"),
 		),
 	)
 
@@ -616,6 +619,9 @@ func postTools(s *server.MCPServer, token *string) {
 			res, err := project.NewDefaultProject().GetPostsWithOptions(*token, projectId, opts)
 			if err != nil {
 				return nil, err
+			}
+			if emptyDespiteTotal(res.RawJSON) {
+				return mcp.NewToolResultError("find_posts returned 0 items although totalCount > 0: Dooray silently returns an empty page when its rate limit (burst 20, refill 5/s) is exhausted. Wait a few seconds and retry."), nil
 			}
 			result = res.RawJSON
 			if raw, _ := request.GetArguments()["raw"].(bool); !raw {
@@ -765,12 +771,19 @@ func postTools(s *server.MCPServer, token *string) {
 			if v, ok := request.GetArguments()["size"]; ok {
 				size = int(v.(float64))
 			}
-			url := fmt.Sprintf("%s/project/v1/projects/%s/posts/%s/logs?page=%d&size=%d", doorayAPIEndpoint, projectId, postId, page, size)
+			order, _ := request.GetArguments()["order"].(string)
+			if order == "" {
+				order = "createdAt"
+			}
+			url := fmt.Sprintf("%s/project/v1/projects/%s/posts/%s/logs?page=%d&size=%d&order=%s", doorayAPIEndpoint, projectId, postId, page, size, order)
 			res, err := getURL(ctx, *token, url)
 			if err != nil {
 				return nil, err
 			}
 			result = res
+			if since, _ := request.GetArguments()["since"].(string); since != "" {
+				result = slimLogs(res, since)
+			}
 		case "delete_log":
 			postId, _ := request.GetArguments()["postId"].(string)
 			logId, _ := request.GetArguments()["logId"].(string)

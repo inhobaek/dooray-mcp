@@ -56,3 +56,14 @@ func TestSlimChannelsProjects(t *testing.T) {
 		t.Fatal(pr)
 	}
 }
+
+func TestSlimLogsAndRateLimit(t *testing.T) {
+	raw := `{"result":[{"id":"a","createdAt":"2026-09-05T10:00:00+09:00","body":{"content":"x"}},{"id":"b","createdAt":"2026-09-01T10:00:00+09:00"}]}`
+	out := slimLogs(raw, "2026-09-04T00:00:00+09:00")
+	if !strings.Contains(out, `"id":"a"`) || strings.Contains(out, `"id":"b"`) || !strings.Contains(out, `"content":"x"`) {
+		t.Fatal(out)
+	}
+	if !emptyDespiteTotal(`{"totalCount":5,"result":[]}`) || emptyDespiteTotal(`{"totalCount":0,"result":[]}`) || emptyDespiteTotal(`{"totalCount":1,"result":[{}]}`) {
+		t.Fatal("rate limit detection")
+	}
+}
