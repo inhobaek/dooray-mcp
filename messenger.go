@@ -41,6 +41,12 @@ func MessengerTools(s *server.MCPServer, token *string) {
 		mcp.WithNumber("limit",
 			mcp.Description("max number of logs to fetch for 'find_channel_logs' (sent as 'size' query parameter, default 50)"),
 		),
+		mcp.WithString("since",
+			mcp.Description("find_channel_logs only: drop messages whose sentAt is older than this RFC3339 time (e.g. 2026-09-04T20:00:00+09:00). Filtered client-side after fetching 'limit' messages"),
+		),
+		mcp.WithBoolean("raw",
+			mcp.Description("return the untrimmed Dooray response. Default false: find_channels/find_channel_logs are slimmed to the fields an assistant needs (attachments keep title/text only; use raw=true when you need attachment titleLink URLs)"),
+		),
 		mcp.WithString("webhookUrl",
 			mcp.Description("dooray messenger webhook URL, e.g. https://example.dooray.com/services/... (required for 'send_webhook')"),
 		),
@@ -99,6 +105,9 @@ func MessengerTools(s *server.MCPServer, token *string) {
 				return nil, err
 			}
 			result = body
+			if raw, _ := request.GetArguments()["raw"].(bool); !raw {
+				result = slimChannels(body)
+			}
 		case "find_channel_logs":
 			channelId, _ := request.GetArguments()["channelId"].(string)
 			if channelId == "" {
@@ -115,6 +124,10 @@ func MessengerTools(s *server.MCPServer, token *string) {
 				return nil, err
 			}
 			result = body
+			if raw, _ := request.GetArguments()["raw"].(bool); !raw {
+				since, _ := request.GetArguments()["since"].(string)
+				result = slimChannelLogs(body, since)
+			}
 		case "send_webhook":
 			webhookUrl, _ := request.GetArguments()["webhookUrl"].(string)
 			message, _ := request.GetArguments()["message"].(string)

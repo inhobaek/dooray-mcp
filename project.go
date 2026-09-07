@@ -302,6 +302,9 @@ func projectTools(s *server.MCPServer, token *string) {
 		mcp.WithString("type",
 			mcp.Description("find_projects only: project type, it can be either 'public' or 'private', default is 'public', it can not be 'all' to get all projects. "),
 		),
+		mcp.WithBoolean("raw",
+			mcp.Description("return the untrimmed Dooray response. Default false: list results are slimmed (users collapsed to names, tags to ids, header dropped)"),
+		),
 		mcp.WithString("state",
 			mcp.Description("find_projects only: project state, it can be either 'active' or 'archived', default is 'active'"),
 		),
@@ -347,6 +350,9 @@ func projectTools(s *server.MCPServer, token *string) {
 				return nil, err
 			}
 			result = res.RawJSON
+			if raw, _ := request.GetArguments()["raw"].(bool); !raw {
+				result = slimProjects(res.RawJSON)
+			}
 		case "get_tags":
 			projectId, _ := request.GetArguments()["projectId"].(string)
 			if projectId == "" {
@@ -395,6 +401,9 @@ func postTools(s *server.MCPServer, token *string) {
 			mcp.Description("project id, it can be a single id or a comma separated list of projectIds. it can be obtained from the find_projects tool. Required for every operation EXCEPT get_post: get_post works with postId alone (the share URL https://.../project/tasks/{postId} exposes only postId), and the response's result.project.id gives you the projectId for any follow-up call."),
 		),
 		// get_post fields
+		mcp.WithBoolean("raw",
+			mcp.Description("return the untrimmed Dooray response. Default false: list results are slimmed (users collapsed to names, tags to ids, header dropped)"),
+		),
 		mcp.WithString("postId",
 			mcp.Description("post id (required for get_post). it can be obtained from the find_posts tool"),
 		),
@@ -609,6 +618,9 @@ func postTools(s *server.MCPServer, token *string) {
 				return nil, err
 			}
 			result = res.RawJSON
+			if raw, _ := request.GetArguments()["raw"].(bool); !raw {
+				result = slimPosts(res.RawJSON)
+			}
 		case "get_post":
 			postId, _ := request.GetArguments()["postId"].(string)
 			if postId == "" {
