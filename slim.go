@@ -80,7 +80,8 @@ func userNames(v any) []string {
 
 // slimChannelLogs: since(RFC3339, 문자열 비교로 충분)보다 오래된 메시지는 버린다.
 // ponytail: sentAt 오프셋이 채널마다 다르면 비교가 어긋난다. 실측은 모두 +09:00.
-func slimChannelLogs(raw, since string) string {
+// resolve는 organizationMemberId를 이름으로 바꾼다(nil이면 ID 그대로). 메신저 API는 sender에 이름을 주지 않는다.
+func slimChannelLogs(raw, since string, resolve func(id string) string) string {
 	return slimJSON(raw, func(m map[string]any) map[string]any {
 		sentAt := str(m["sentAt"])
 		if since != "" && sentAt < since {
@@ -89,8 +90,10 @@ func slimChannelLogs(raw, since string) string {
 		s := pick(m, "id", "type", "sentAt", "text")
 		if n := str(m["customName"]); n != "" {
 			s["sender"] = n
+		} else if id := userName(m["sender"]); resolve != nil && str(m["sender"], "member", "name") == "" {
+			s["sender"] = resolve(id)
 		} else {
-			s["sender"] = userName(m["sender"])
+			s["sender"] = id
 		}
 		if atts, ok := m["attachments"].([]any); ok && len(atts) > 0 {
 			out := make([]any, 0, len(atts))

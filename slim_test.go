@@ -9,8 +9,9 @@ import (
 func TestSlimChannelLogs(t *testing.T) {
 	raw := `{"header":{"resultCode":0},"result":[
 	 {"id":"1","seq":5,"type":"WEBHOOK","sender":{"type":"member","member":{"organizationMemberId":"9"}},"customName":"Endpoint","customIconUrl":"http://x/pepe.png","sentAt":"2026-09-05T01:00:00+09:00","text":"hi","attachments":[{"color":"orange","title":"T","titleLink":"http://l","text":"body"}],"flags":{}},
-	 {"id":"2","type":"MEMBER","sender":{"type":"member","member":{"organizationMemberId":"8","name":"백인호"}},"sentAt":"2026-09-01T01:00:00+09:00","text":"old"}]}`
-	out := slimChannelLogs(raw, "2026-09-04T20:00:00+09:00")
+	 {"id":"2","type":"MEMBER","sender":{"type":"member","member":{"organizationMemberId":"8","name":"백인호"}},"sentAt":"2026-09-01T01:00:00+09:00","text":"old"},
+	 {"id":"3","type":"NORMAL","sender":{"type":"member","member":{"organizationMemberId":"7"}},"sentAt":"2026-09-01T02:00:00+09:00","text":"nameless"}]}`
+	out := slimChannelLogs(raw, "2026-09-04T20:00:00+09:00", nil)
 	var env map[string]any
 	if err := json.Unmarshal([]byte(out), &env); err != nil {
 		t.Fatal(err)
@@ -26,7 +27,11 @@ func TestSlimChannelLogs(t *testing.T) {
 	if strings.Contains(out, "customIconUrl") || strings.Contains(out, "titleLink") || strings.Contains(out, "header") {
 		t.Fatalf("noise kept: %s", out)
 	}
-	if slimChannelLogs(raw, "")[0] != '{' || len(slimJSON("not json", nil)) != 8 {
+	all := slimChannelLogs(raw, "", func(id string) string { return "N" + id })
+	if !strings.Contains(all, `"sender":"N7"`) || !strings.Contains(all, `"sender":"백인호"`) {
+		t.Fatalf("resolver should fill only nameless senders: %s", all)
+	}
+	if slimChannelLogs(raw, "", nil)[0] != '{' || len(slimJSON("not json", nil)) != 8 {
 		t.Fatal("fallback")
 	}
 }

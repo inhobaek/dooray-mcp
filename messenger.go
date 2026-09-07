@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/dooray-go/dooray-sdk/openapi/messenger"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -126,7 +127,7 @@ func MessengerTools(s *server.MCPServer, token *string) {
 			result = body
 			if raw, _ := request.GetArguments()["raw"].(bool); !raw {
 				since, _ := request.GetArguments()["since"].(string)
-				result = slimChannelLogs(body, since)
+				result = slimChannelLogs(body, since, func(id string) string { return memberName(ctx, *token, id) })
 			}
 		case "send_webhook":
 			webhookUrl, _ := request.GetArguments()["webhookUrl"].(string)
@@ -257,4 +258,35 @@ func sendWebhookMessage(ctx context.Context, webhookUrl, message string) (string
 		return "", fmt.Errorf("webhook POST failed: status=%d body=%s", resp.StatusCode, string(body))
 	}
 	return string(body), nil
+}
+
+// memberName은 organizationMemberId를 이름으로 바꾼다. 프로세스 수명 동안 캐시한다.
+// ponytail: 채널당 고유 발신자는 수십 명 이하라 건별 GET으로 충분. 실패하면 ID를 그대로 쓴다.
+var (
+	memberNamesMu sync.Mutex
+	memberNames   = map[string]string{}
+)
+
+func memberName(ctx context.Context, token, id string) string {
+	memberNamesMu.Lock()
+	if n, ok := memberNames[id]; ok {
+		memberNamesMu.Unlock()
+		return n
+	}
+	memberNamesMu.Unlock()
+	name := id
+	if body, err := doorayGet(ctx, token, fmt.Sprintf("%s/common/v1/members/%s", doorayAPIEndpoint, id)); err == nil {
+		var env struct {
+			Result struct {
+				Name string `json:"name"`
+			} `json:"result"`
+		}
+		if json.Unmarshal([]byte(body), &env) == nil && env.Result.Name != "" {
+			name = env.Result.Name
+		}
+	}
+	memberNamesMu.Lock()
+	memberNames[id] = name
+	memberNamesMu.Unlock()
+	return name
 }
