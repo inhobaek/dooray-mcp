@@ -13,10 +13,16 @@ type PostEmailUser struct {
 	Name         string `json:"name,omitempty"`
 }
 
+// PostGroup represents a project member group in the post (local patch: upstream SDK has no group recipient).
+type PostGroup struct {
+	ProjectMemberGroupID string `json:"projectMemberGroupId,omitempty"`
+}
+
 // PostRecipient represents a recipient (to or cc) in the post.
 type PostRecipient struct {
 	Type      string         `json:"type"`
 	Member    *PostMember    `json:"member,omitempty"`
+	Group     *PostGroup     `json:"group,omitempty"`
 	EmailUser *PostEmailUser `json:"emailUser,omitempty"`
 }
 

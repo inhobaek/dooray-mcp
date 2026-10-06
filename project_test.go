@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
+	model "github.com/dooray-go/dooray-sdk/openapi/model/project"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -611,5 +613,29 @@ func TestDeleteFileGuards(t *testing.T) {
 	}
 	if res := call(map[string]any{"postId": "2", "fileId": "3", "confirmToken": "deadbeef"}); !res.IsError {
 		t.Error("expected error for a confirmToken that was never issued")
+	}
+}
+
+func TestUpdateRecipientGroupJSON(t *testing.T) {
+	// update_post PUT은 전체치환이라 그룹 참조를 type=group으로 다시 실어야 보존된다.
+	b, err := json.Marshal(updateRecipient{Type: "group", Group: &templateGroupRef{ProjectMemberGroupID: "1111111111111111111"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"type":"group","group":{"projectMemberGroupId":"1111111111111111111"}}`
+	if string(b) != want {
+		t.Fatalf("got %s, want %s", b, want)
+	}
+}
+
+func TestPostRecipientGroupJSON(t *testing.T) {
+	// create_post도 그룹 참조를 type=group으로 보내야 한다.
+	b, err := json.Marshal(model.PostRecipient{Type: "group", Group: &model.PostGroup{ProjectMemberGroupID: "1111111111111111111"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"type":"group","group":{"projectMemberGroupId":"1111111111111111111"}}`
+	if string(b) != want {
+		t.Fatalf("got %s, want %s", b, want)
 	}
 }

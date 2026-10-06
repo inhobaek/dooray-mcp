@@ -268,6 +268,7 @@ type recipientWorkflow struct {
 type updateRecipient struct {
 	Type     string             `json:"type"`
 	Member   *model.PostMember  `json:"member,omitempty"`
+	Group    *templateGroupRef  `json:"group,omitempty"` // type=group (projectMemberGroupId)
 	Workflow *recipientWorkflow `json:"workflow,omitempty"`
 }
 
@@ -425,6 +426,12 @@ func postTools(s *server.MCPServer, token *string) {
 		),
 		mcp.WithString("ccMemberIdsCreate",
 			mcp.Description("cc organizationMemberIds for create_post, comma separated. type=member"),
+		),
+		mcp.WithString("toGroupIdsCreate",
+			mcp.Description("assignee projectMemberGroupIds for create_post/update_post, comma separated. type=group. get_post returns them as users.to[].group.projectMemberGroupId; on update_post resend them here or the group assignee is dropped by the full-replacement PUT. toMemberWorkflowId is not applied to groups"),
+		),
+		mcp.WithString("ccGroupIdsCreate",
+			mcp.Description("cc projectMemberGroupIds for create_post/update_post, comma separated. type=group. get_post returns them as users.cc[].group.projectMemberGroupId; on update_post resend them here or the group cc is dropped by the full-replacement PUT"),
 		),
 		mcp.WithString("tagIdsCreate",
 			mcp.Description("tag ids for create_post, comma separated"),
@@ -710,6 +717,22 @@ func postTools(s *server.MCPServer, token *string) {
 					}
 				}
 			}
+			if v, _ := request.GetArguments()["toGroupIdsCreate"].(string); v != "" {
+				for _, id := range strings.Split(v, ",") {
+					if id = strings.TrimSpace(id); id != "" {
+						users.To = append(users.To, model.PostRecipient{Type: "group", Group: &model.PostGroup{ProjectMemberGroupID: id}})
+						hasUsers = true
+					}
+				}
+			}
+			if v, _ := request.GetArguments()["ccGroupIdsCreate"].(string); v != "" {
+				for _, id := range strings.Split(v, ",") {
+					if id = strings.TrimSpace(id); id != "" {
+						users.Cc = append(users.Cc, model.PostRecipient{Type: "group", Group: &model.PostGroup{ProjectMemberGroupID: id}})
+						hasUsers = true
+					}
+				}
+			}
 			if hasUsers {
 				post.Users = users
 			}
@@ -934,6 +957,22 @@ func postTools(s *server.MCPServer, token *string) {
 				for _, id := range strings.Split(v, ",") {
 					if id = strings.TrimSpace(id); id != "" {
 						users.Cc = append(users.Cc, updateRecipient{Type: "member", Member: &model.PostMember{OrganizationMemberID: id}})
+						hasUsers = true
+					}
+				}
+			}
+			if v, _ := request.GetArguments()["toGroupIdsCreate"].(string); v != "" {
+				for _, id := range strings.Split(v, ",") {
+					if id = strings.TrimSpace(id); id != "" {
+						users.To = append(users.To, updateRecipient{Type: "group", Group: &templateGroupRef{ProjectMemberGroupID: id}})
+						hasUsers = true
+					}
+				}
+			}
+			if v, _ := request.GetArguments()["ccGroupIdsCreate"].(string); v != "" {
+				for _, id := range strings.Split(v, ",") {
+					if id = strings.TrimSpace(id); id != "" {
+						users.Cc = append(users.Cc, updateRecipient{Type: "group", Group: &templateGroupRef{ProjectMemberGroupID: id}})
 						hasUsers = true
 					}
 				}
